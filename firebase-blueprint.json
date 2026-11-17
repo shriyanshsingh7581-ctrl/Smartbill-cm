@@ -1,0 +1,656 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Shop profile, branding, invoice settings, billing settings, and online store preferences for a merchant.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "UID of the authenticated shop owner",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "shopName": {
+          "type": "string",
+          "description": "Registered or display name of the retail shop",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "ownerName": {
+          "type": "string",
+          "description": "Name of the shop owner",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "phone": {
+          "type": "string",
+          "description": "Primary contact phone number",
+          "minLength": 0,
+          "maxLength": 30
+        },
+        "email": {
+          "type": "string",
+          "description": "Merchant email address",
+          "minLength": 0,
+          "maxLength": 150
+        },
+        "address": {
+          "type": "string",
+          "description": "Shop physical address",
+          "minLength": 0,
+          "maxLength": 300
+        },
+        "gstNumber": {
+          "type": "string",
+          "description": "Shop GSTIN number",
+          "minLength": 0,
+          "maxLength": 30
+        },
+        "fssaiNumber": {
+          "type": "string",
+          "description": "Shop FSSAI license number",
+          "minLength": 0,
+          "maxLength": 30
+        },
+        "logoUrl": {
+          "type": "string",
+          "description": "Cloudinary URL of the shop logo",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "language": {
+          "type": "string",
+          "description": "Selected UI language code",
+          "enum": ["en", "hi", "gu", "mr"],
+          "minLength": 2,
+          "maxLength": 10
+        },
+        "configPayload": {
+          "type": "string",
+          "description": "Serialized invoice, billing, printer, and online store configuration map",
+          "minLength": 0,
+          "maxLength": 15000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update"
+        }
+      },
+      "required": ["ownerId", "shopName", "language", "configPayload", "createdAt", "updatedAt"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Inventory stock item with pricing, barcode, GST, rack, expiry, and variants.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "variantName": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "barcode": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 64
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "mrp": {
+          "type": "number"
+        },
+        "retailPrice": {
+          "type": "number"
+        },
+        "wholesalePrice": {
+          "type": "number"
+        },
+        "purchasePrice": {
+          "type": "number"
+        },
+        "quantity": {
+          "type": "number"
+        },
+        "lowStockAlert": {
+          "type": "number"
+        },
+        "gst": {
+          "type": "number"
+        },
+        "cess": {
+          "type": "number"
+        },
+        "hsn": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 32
+        },
+        "rack": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 64
+        },
+        "category": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 100
+        },
+        "supplierName": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "expiryDate": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 32
+        },
+        "imageUrl": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "archived": {
+          "type": "boolean"
+        },
+        "detailsPayload": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 10000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "name", "unit", "mrp", "retailPrice", "quantity", "archived", "createdAt", "updatedAt"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "POS sale bill / customer order record.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "invoiceNumber": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "dateStr": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "timeStr": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "customerName": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "customerPhone": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 30
+        },
+        "customerId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "paymentMode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "priceMode": {
+          "type": "string",
+          "enum": ["Retail", "Wholesale"],
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "totalMrp": {
+          "type": "number"
+        },
+        "totalAmount": {
+          "type": "number"
+        },
+        "paidAmount": {
+          "type": "number"
+        },
+        "discountAmount": {
+          "type": "number"
+        },
+        "totalProfit": {
+          "type": "number"
+        },
+        "itemCount": {
+          "type": "number"
+        },
+        "itemsPayload": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 50000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "invoiceNumber", "dateStr", "timeStr", "paymentMode", "priceMode", "totalMrp", "totalAmount", "paidAmount", "discountAmount", "totalProfit", "itemCount", "itemsPayload", "createdAt", "updatedAt"]
+    },
+    "Purchase": {
+      "title": "Purchase",
+      "description": "Supplier purchase entry record.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "supplierName": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "supplierId": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "paymentMode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "dateStr": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "totalAmount": {
+          "type": "number"
+        },
+        "discountAmount": {
+          "type": "number"
+        },
+        "billImageUrl": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "itemsPayload": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 50000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "paymentMode", "dateStr", "totalAmount", "discountAmount", "itemsPayload", "createdAt", "updatedAt"]
+    },
+    "SaleReturn": {
+      "title": "SaleReturn",
+      "description": "Customer sale return or exchange entry.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "returnNumber": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "invoiceNumber": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 64
+        },
+        "customerName": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "paymentMode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "dateStr": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "totalAmount": {
+          "type": "number"
+        },
+        "itemsPayload": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 50000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "returnNumber", "paymentMode", "dateStr", "totalAmount", "itemsPayload", "createdAt", "updatedAt"]
+    },
+    "Supplier": {
+      "title": "Supplier",
+      "description": "Supplier contact and ledger balance record.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "phone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30
+        },
+        "address": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 300
+        },
+        "notes": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "gstNumber": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 30
+        },
+        "avatarUrl": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "balance": {
+          "type": "number",
+          "description": "Positive means You Will Get, negative means You Will Give"
+        },
+        "ledgerPayload": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 50000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "name", "phone", "balance", "ledgerPayload", "createdAt", "updatedAt"]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "Customer contact, wallet, and ledger balance record.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "phone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30
+        },
+        "address": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 300
+        },
+        "notes": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "gstNumber": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 30
+        },
+        "avatarUrl": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "balance": {
+          "type": "number",
+          "description": "Positive means You Will Get, negative means You Will Give"
+        },
+        "ledgerPayload": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 50000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "name", "phone", "balance", "ledgerPayload", "createdAt", "updatedAt"]
+    },
+    "Expense": {
+      "title": "Expense",
+      "description": "Business expense entry.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "dateStr": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "paymentMethod": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "notes": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "totalAmount": {
+          "type": "number"
+        },
+        "itemsPayload": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 20000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "title", "dateStr", "category", "paymentMethod", "totalAmount", "itemsPayload", "createdAt", "updatedAt"]
+    },
+    "Staff": {
+      "title": "Staff",
+      "description": "Staff member, attendance, and salary record.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "phone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "salary": {
+          "type": "number"
+        },
+        "commissionPct": {
+          "type": "number"
+        },
+        "attendancePayload": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 20000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "name", "phone", "role", "salary", "commissionPct", "attendancePayload", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Root merchant profile document scoped to userId"
+    },
+    "/users/{userId}/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Per-user products and stock inventory"
+    },
+    "/users/{userId}/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Per-user POS bills and customer orders"
+    },
+    "/users/{userId}/purchases/{purchaseId}": {
+      "schema": { "$ref": "#/entities/Purchase" },
+      "description": "Per-user supplier purchase entries"
+    },
+    "/users/{userId}/returns/{returnId}": {
+      "schema": { "$ref": "#/entities/SaleReturn" },
+      "description": "Per-user sale return and exchange entries"
+    },
+    "/users/{userId}/suppliers/{supplierId}": {
+      "schema": { "$ref": "#/entities/Supplier" },
+      "description": "Per-user suppliers and supplier ledger"
+    },
+    "/users/{userId}/customers/{customerId}": {
+      "schema": { "$ref": "#/entities/Customer" },
+      "description": "Per-user customers and customer ledger"
+    },
+    "/users/{userId}/expenses/{expenseId}": {
+      "schema": { "$ref": "#/entities/Expense" },
+      "description": "Per-user business expenses"
+    },
+    "/users/{userId}/staff/{staffId}": {
+      "schema": { "$ref": "#/entities/Staff" },
+      "description": "Per-user staff members and attendance"
+    }
+  }
+}
