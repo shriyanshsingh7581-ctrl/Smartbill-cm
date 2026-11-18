@@ -49,7 +49,7 @@ import {
   type ExpenseDoc,
   type StaffDoc,
 } from './firebase';
-import { askGroqInventoryAssistant } from './services/integrations';
+import { askGroqInventoryAssistant, type ScannedVisionResult } from './services/integrations';
 import { TRANSLATIONS, type LanguageCode } from './i18n/translations';
 import { AuthScreen } from './components/AuthScreen';
 import { BarcodeScannerModal } from './components/BarcodeScannerModal';
@@ -115,7 +115,11 @@ export default function App() {
 
   // Global Camera Barcode Scanner State
   const [scannerOpen, setScannerOpen] = useState(false);
-  const [scannerCallback, setScannerCallback] = useState<((code: string) => void) | null>(null);
+  const [scannerMode, setScannerMode] = useState<'barcode_or_imei' | 'bill_items'>('barcode_or_imei');
+  const [scannerTitle, setScannerTitle] = useState<string | undefined>(undefined);
+  const [scannerCallback, setScannerCallback] = useState<
+    ((code: string, visionResult?: ScannedVisionResult) => void) | null
+  >(null);
 
   // Home Modals (QR Code, Notifications, Floating Groq AI Assistant, Purchase/Returns Chooser)
   const [showStoreQrModal, setShowStoreQrModal] = useState(false);
@@ -176,8 +180,13 @@ export default function App() {
   const lang: LanguageCode = profile.language || 'en';
   const t = (key: string) => TRANSLATIONS[lang]?.[key] || TRANSLATIONS.en[key] || key;
 
-  const handleOpenScanner = (cb: (code: string) => void) => {
+  const handleOpenScanner = (
+    cb: (code: string, visionResult?: ScannedVisionResult) => void,
+    opts?: { scanMode?: 'barcode_or_imei' | 'bill_items'; title?: string }
+  ) => {
     setScannerCallback(() => cb);
+    setScannerMode(opts?.scanMode || 'barcode_or_imei');
+    setScannerTitle(opts?.title);
     setScannerOpen(true);
   };
 
@@ -780,14 +789,16 @@ export default function App() {
         </nav>
       )}
 
-      {/* Global Live Camera Barcode Scanner Modal */}
+      {/* Global Dual-Mode Camera & AI Vision Barcode/IMEI Scanner Modal */}
       {scannerOpen && (
         <BarcodeScannerModal
           isOpen={scannerOpen}
+          scanMode={scannerMode}
+          title={scannerTitle}
           onClose={() => setScannerOpen(false)}
-          onScanSuccess={(code: string) => {
+          onScanSuccess={(code: string, visionResult?: ScannedVisionResult) => {
             setScannerOpen(false);
-            if (scannerCallback) scannerCallback(code);
+            if (scannerCallback) scannerCallback(code, visionResult);
           }}
         />
       )}

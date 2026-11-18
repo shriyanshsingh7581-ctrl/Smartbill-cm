@@ -16,6 +16,7 @@ import {
   CheckCircle2,
   Trash2,
   UserPlus,
+  Mic,
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
@@ -29,7 +30,12 @@ import {
   type UserProfileDoc,
   type OrderLineItem,
 } from '../firebase';
-import { downloadElementAsPdf } from '../services/integrations';
+import {
+  downloadElementAsPdf,
+  type ScannedVisionResult,
+  type ParsedVoiceResult,
+} from '../services/integrations';
+import { SmartVoiceModal } from './SmartVoiceModal';
 
 export type BillingSubScreen =
   | 'new_bill'
@@ -49,7 +55,10 @@ interface BillingAndOrdersProps {
   returns: SaleReturnDoc[];
   customers: CustomerDoc[];
   profile: UserProfileDoc;
-  onOpenScanner: (cb: (code: string) => void) => void;
+  onOpenScanner: (
+    cb: (code: string, visionResult?: ScannedVisionResult) => void,
+    opts?: { scanMode?: 'barcode_or_imei' | 'bill_items'; title?: string }
+  ) => void;
   onOpenAddCustomer: () => void;
 }
 
@@ -112,6 +121,7 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
   const [emptyCartToast, setEmptyCartToast] = useState(false);
   const [savingBill, setSavingBill] = useState(false);
   const [createdOrderModal, setCreatedOrderModal] = useState<OrderDoc | null>(null);
+  const [voiceModalOpen, setVoiceModalOpen] = useState(false);
 
   // Quick Add modal inside POS
   const [quickAddOpen, setQuickAddOpen] = useState(false);
@@ -1572,7 +1582,16 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
 
       {/* Bottom POS Controls (Matches 10:41) */}
       <div className="sticky bottom-0 z-20 bg-[#FAF9F5] pt-2 pb-4 px-4 max-w-md mx-auto w-full space-y-2.5">
-        <div className="flex justify-end">
+        <div className="flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => setVoiceModalOpen(true)}
+            className="bg-purple-100 border border-purple-300 text-purple-800 rounded-xl px-3.5 py-2 text-xs font-extrabold flex items-center gap-1.5 shadow-xs active:scale-95"
+          >
+            <Mic className="w-4 h-4" />
+            <span>AI Voice Bill</span>
+          </button>
+
           <button
             type="button"
             onClick={() => setSearchFocused(true)}
@@ -1625,14 +1644,49 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
           <button
             type="button"
             onClick={() =>
-              onOpenScanner((code) => {
-                const matched = products.find((p) => p.barcode === code);
-                if (matched) addProductToCart(matched);
-                else {
-                  setQaBarcode(code);
-                  setQuickAddOpen(true);
-                }
-              })
+              onOpenScanner(
+                (code, visionResult) => {
+                  const matched = products.find((p) => p.barcode === code);
+                  if (matched) {
+                    addProductToCart(matched);
+                  } else if (visionResult?.items && visionResult.items.length > 0) {
+                    const newCartItems: OrderLineItem[] = visionResult.items.map((it, idx) => {
+                      const found = products.find(
+                        (p) =>
+                          (it.barcode && p.barcode === it.barcode) ||
+                          (it.name && p.name.toLowerCase() === it.name.toLowerCase())
+                      );
+                      return {
+                        productId: found?.id || `scan_pos_${Date.now()}_${idx}`,
+                        name: found?.name || it.name || `Item ${code}`,
+                        variantName: found?.variantName || '',
+                        barcode: found?.barcode || it.barcode || it.imei || code,
+                        unit: found?.unit || it.unit || 'Piece',
+                        qty: it.qty || 1,
+                        mrp: it.mrp || it.price || found?.mrp || 0,
+                        retailPrice: it.price || found?.retailPrice || 0,
+                        purchasePrice: found?.purchasePrice || 0,
+                        gst: found?.gst || 0,
+                        cess: found?.cess || 0,
+                        hsn: found?.hsn || '',
+                        discount: 0,
+                      };
+                    });
+                    setCartItems((prev) => [...prev, ...newCartItems]);
+                  } else {
+                    setQaBarcode(code);
+                    if (visionResult?.productName) setQaName(visionResult.productName);
+                    if (visionResult?.mrp || visionResult?.price) {
+                      const p = String(visionResult.mrp || visionResult.price);
+                      setQaMrp(p);
+                      setQaRetail(String(visionResult.price || visionResult.mrp));
+                    }
+                    if (visionResult?.qty) setQaQty(String(visionResult.qty));
+                    setQuickAddOpen(true);
+                  }
+                },
+                { scanMode: 'barcode_or_imei', title: 'Scan Product Barcode / IMEI' }
+              )
             }
             className="bg-white border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-800 flex items-center gap-1.5 shadow-xs"
           >
@@ -1854,6 +1908,59 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
           </div>
         </div>
       )}
+
+      <SmartVoiceModal
+        isOpen={voiceModalOpen}
+        onClose={() => setVoiceModalOpen(false)}
+        context="billing"
+        title="🎙️ AI Voice Billing"
+        onVoiceApplied={(result: ParsedVoiceResult) => {
+          const items = result.items || [];
+          if (items.length === 0 && result.transcript) {
+            setQaName(result.transcript);
+            setQuickAddOpen(true);
+            return;
+          }
+          if (items.length === 1 && (!items[0].price || items[0].price <= 0)) {
+            const matched = products.find(
+              (p) => p.name.toLowerCase() === items[0].name.toLowerCase()
+            );
+            if (matched) {
+              addProductToCart(matched);
+              return;
+            }
+            setQaName(items[0].name);
+            setQaQty(String(items[0].qty || 1));
+            setQaUnit(items[0].unit || 'Piece');
+            setQuickAddOpen(true);
+            return;
+          }
+          const voiceCartItems: OrderLineItem[] = items.map((it, idx) => {
+            const matched = products.find(
+              (p) =>
+                p.name.toLowerCase() === it.name.toLowerCase() ||
+                (it.barcode && p.barcode === it.barcode)
+            );
+            const price = it.price || matched?.retailPrice || 0;
+            return {
+              productId: matched?.id || `voice_pos_${Date.now()}_${idx}`,
+              name: matched?.name || it.name,
+              variantName: matched?.variantName || '',
+              barcode: matched?.barcode || it.barcode || '',
+              unit: matched?.unit || it.unit || 'Piece',
+              qty: it.qty || 1,
+              mrp: it.mrp || price || matched?.mrp || 0,
+              retailPrice: price,
+              purchasePrice: matched?.purchasePrice || 0,
+              gst: matched?.gst || 0,
+              cess: matched?.cess || 0,
+              hsn: matched?.hsn || '',
+              discount: 0,
+            };
+          });
+          setCartItems((prev) => [...prev, ...voiceCartItems]);
+        }}
+      />
     </div>
   );
 };

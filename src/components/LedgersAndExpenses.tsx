@@ -24,7 +24,7 @@ import {
   type ExpenseDoc,
   type LedgerEntry,
 } from '../firebase';
-import { uploadImageToCloudinary } from '../services/integrations';
+import { ApkPhotoSheet } from './ApkPhotoSheet';
 
 export type LedgerSubScreen =
   | 'suppliers'
@@ -58,6 +58,7 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [balanceFilter, setBalanceFilter] = useState<'all' | 'give' | 'get'>('all');
+  const [avatarPhotoSheetOpen, setAvatarPhotoSheetOpen] = useState(false);
   const [preparingLedger, setPreparingLedger] = useState(false);
 
   // Add Supplier / Customer Bottom Sheet state
@@ -918,7 +919,11 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
 
             {/* Avatar Upload Circle */}
             <div className="flex justify-center py-1">
-              <label className="w-24 h-24 rounded-full bg-slate-200 border border-slate-300 flex items-center justify-center relative cursor-pointer">
+              <button
+                type="button"
+                onClick={() => setAvatarPhotoSheetOpen(true)}
+                className="w-24 h-24 rounded-full bg-slate-200 border border-slate-300 flex items-center justify-center relative cursor-pointer"
+              >
                 {partyAvatar ? (
                   <img
                     src={partyAvatar}
@@ -932,19 +937,7 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
                 <span className="absolute bottom-0 right-0 w-8 h-8 rounded-full bg-[#0A2540] text-white flex items-center justify-center shadow">
                   <Camera className="w-4 h-4" />
                 </span>
-                <input
-                  type="file"
-                  accept="image/*"
-                  className="hidden"
-                  onChange={async (e) => {
-                    const file = e.target.files?.[0];
-                    if (file) {
-                      const url = await uploadImageToCloudinary(file);
-                      setPartyAvatar(url);
-                    }
-                  }}
-                />
-              </label>
+              </button>
             </div>
 
             <div>
@@ -1146,6 +1139,13 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
           </div>
         </div>
       )}
+
+      <ApkPhotoSheet
+        isOpen={avatarPhotoSheetOpen}
+        onClose={() => setAvatarPhotoSheetOpen(false)}
+        title={isSupplierScreen ? 'Supplier Photo' : 'Customer Photo'}
+        onUploaded={(url) => setPartyAvatar(url)}
+      />
     </div>
   );
 };

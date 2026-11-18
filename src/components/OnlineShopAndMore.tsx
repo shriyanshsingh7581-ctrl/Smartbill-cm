@@ -50,7 +50,7 @@ import {
   type SupplierDoc,
   type StaffDoc,
 } from '../firebase';
-import { uploadImageToCloudinary } from '../services/integrations';
+import { ApkPhotoSheet } from './ApkPhotoSheet';
 import { type LanguageCode, TRANSLATIONS } from '../i18n/translations';
 
 interface OnlineShopProps {
@@ -463,12 +463,11 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
     }
   }, [subScreen, syncStep, selectedLang, uid]);
 
-  const handleUploadShopLogo = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const [logoPhotoSheetOpen, setLogoPhotoSheetOpen] = useState(false);
+
+  const handleUploadedShopLogo = async (url: string) => {
     setUploadingLogo(true);
     try {
-      const url = await uploadImageToCloudinary(file);
       setLogoUrl(url);
       await updateUserProfile(uid, { logoUrl: url });
     } finally {
@@ -785,16 +784,14 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
             <div className="flex-1">
               <p className="text-sm font-bold text-slate-800">Shop Logo</p>
               <p className="text-xs text-slate-400 mb-2">Printed on thermal & A4 tax invoices</p>
-              <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0A2540] text-white text-xs font-bold cursor-pointer">
+              <button
+                type="button"
+                onClick={() => setLogoPhotoSheetOpen(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0A2540] text-white text-xs font-bold cursor-pointer"
+              >
                 <Camera className="w-3.5 h-3.5" />
-                {uploadingLogo ? 'Uploading...' : 'Upload Logo'}
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={handleUploadShopLogo}
-                  className="hidden"
-                />
-              </label>
+                <span>{uploadingLogo ? 'Uploading...' : 'Upload Logo'}</span>
+              </button>
             </div>
           </div>
 
@@ -862,6 +859,13 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
             {savingShop ? 'Updating...' : 'Update Details'}
           </button>
         </div>
+
+        <ApkPhotoSheet
+          isOpen={logoPhotoSheetOpen}
+          onClose={() => setLogoPhotoSheetOpen(false)}
+          title="Upload Shop Logo"
+          onUploaded={handleUploadedShopLogo}
+        />
       </div>
     );
   }

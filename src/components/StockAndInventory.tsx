@@ -41,12 +41,15 @@ import {
   type OrderLineItem,
 } from '../firebase';
 import {
-  uploadImageToCloudinary,
   askGroqInventoryAssistant,
   downloadInventoryTemplate,
   exportStockToExcel,
   parseExcelInventoryFile,
+  type ScannedVisionResult,
+  type ParsedVoiceResult,
 } from '../services/integrations';
+import { SmartVoiceModal } from './SmartVoiceModal';
+import { ApkPhotoSheet } from './ApkPhotoSheet';
 
 export type InventorySubScreen =
   | 'my_stock'
@@ -65,7 +68,10 @@ interface StockAndInventoryProps {
   expenses: ExpenseDoc[];
   suppliers: SupplierDoc[];
   profile: UserProfileDoc;
-  onOpenScanner: (cb: (code: string) => void) => void;
+  onOpenScanner: (
+    cb: (code: string, visionResult?: ScannedVisionResult) => void,
+    opts?: { scanMode?: 'barcode_or_imei' | 'bill_items'; title?: string }
+  ) => void;
   onOpenAddSupplier: () => void;
 }
 
@@ -128,7 +134,9 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
   const [purDiscountModal, setPurDiscountModal] = useState(false);
   const [purItems, setPurItems] = useState<OrderLineItem[]>([]);
   const [purSearch, setPurSearch] = useState('');
-  const [voiceListening, setVoiceListening] = useState(false);
+  const [voiceModalOpen, setVoiceModalOpen] = useState(false);
+  const [voiceContext, setVoiceContext] = useState<'purchase' | 'search'>('purchase');
+  const [photoSheetTarget, setPhotoSheetTarget] = useState<'purchase_bill' | 'manual_product' | null>(null);
   const [savingPurchase, setSavingPurchase] = useState(false);
 
   // Excel Import states
@@ -229,41 +237,59 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
     })
     .sort((a, b) => (sortAsc ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name)));
 
-  // Voice entry for Purchase Screen
-  const handleStartVoiceEntry = () => {
-    const Win = window as unknown as {
-      SpeechRecognition?: new () => {
-        lang: string;
-        start: () => void;
-        onresult: (e: { results: { [key: number]: { [key: number]: { transcript: string } } } }) => void;
-        onerror: () => void;
-        onend: () => void;
-      };
-      webkitSpeechRecognition?: new () => {
-        lang: string;
-        start: () => void;
-        onresult: (e: { results: { [key: number]: { [key: number]: { transcript: string } } } }) => void;
-        onerror: () => void;
-        onend: () => void;
-      };
-    };
-    const SpeechRec = Win.SpeechRecognition || Win.webkitSpeechRecognition;
-    if (!SpeechRec) {
+  // Universal APK Voice Entry (Groq Whisper + Gboard + Native Audio Fallback)
+  const handleStartVoiceEntry = (ctx: 'purchase' | 'search' = 'purchase') => {
+    setVoiceContext(ctx);
+    setVoiceModalOpen(true);
+  };
+
+  const handleVoiceResultApplied = (result: ParsedVoiceResult) => {
+    if (voiceContext === 'search') {
+      setSearchQuery(result.searchQuery || result.transcript || '');
+      return;
+    }
+
+    const items = result.items || [];
+    if (items.length === 0 && result.transcript) {
+      setQaName(result.transcript);
       setQuickAddOpen(true);
       return;
     }
-    const rec = new SpeechRec();
-    rec.lang = 'en-IN';
-    setVoiceListening(true);
-    rec.onresult = (event) => {
-      const spoken = event.results[0][0].transcript;
-      setQaName(spoken);
-      setVoiceListening(false);
+
+    if (items.length === 1 && (!items[0].price || items[0].price <= 0)) {
+      const it = items[0];
+      setQaName(it.name);
+      setQaQty(String(it.qty || 1));
+      setQaUnit(it.unit || 'Piece');
+      if (it.barcode) setQaBarcode(it.barcode);
       setQuickAddOpen(true);
-    };
-    rec.onerror = () => setVoiceListening(false);
-    rec.onend = () => setVoiceListening(false);
-    rec.start();
+      return;
+    }
+
+    // Auto-add structured voice items directly into Purchase Entry list
+    const newPurItems: OrderLineItem[] = items.map((it, idx) => {
+      const matched = products.find(
+        (p) =>
+          p.name.toLowerCase() === it.name.toLowerCase() ||
+          (it.barcode && p.barcode === it.barcode)
+      );
+      return {
+        productId: matched?.id || `voice_${Date.now()}_${idx}`,
+        name: matched?.name || it.name,
+        variantName: matched?.variantName || '',
+        barcode: matched?.barcode || it.barcode || '',
+        unit: matched?.unit || it.unit || 'Piece',
+        qty: it.qty || 1,
+        mrp: it.mrp || it.price || matched?.mrp || 0,
+        retailPrice: it.price || matched?.retailPrice || 0,
+        purchasePrice: it.price || matched?.purchasePrice || matched?.retailPrice || 0,
+        gst: matched?.gst || 0,
+        cess: matched?.cess || 0,
+        hsn: matched?.hsn || '',
+        discount: 0,
+      };
+    });
+    setPurItems((prev) => [...prev, ...newPurItems]);
   };
 
   // Save Quick Add Product
@@ -622,21 +648,13 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
 
             {/* Right Navy Total Box */}
             <div className="w-36 flex flex-col gap-1.5">
-              <label className="bg-[#0A2540] text-white text-xs font-bold py-2 px-3 rounded-lg text-center cursor-pointer hover:bg-[#12365c] transition-colors">
+              <button
+                type="button"
+                onClick={() => setPhotoSheetTarget('purchase_bill')}
+                className="bg-[#0A2540] text-white text-xs font-bold py-2 px-3 rounded-lg text-center cursor-pointer hover:bg-[#12365c] transition-colors"
+              >
                 {purBillUrl ? '✓ Bill Attached' : '+Attach Bills'}
-                <input
-                  type="file"
-                  accept="image/*"
-                  className="hidden"
-                  onChange={async (e) => {
-                    const file = e.target.files?.[0];
-                    if (file) {
-                      const url = await uploadImageToCloudinary(file);
-                      setPurBillUrl(url);
-                    }
-                  }}
-                />
-              </label>
+              </button>
 
               <div
                 onClick={() => setPurDiscountModal(true)}
@@ -704,32 +722,71 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
             <button
               type="button"
               onClick={() =>
-                onOpenScanner((code) => {
-                  const found = products.find((p) => p.barcode === code);
-                  if (found) {
-                    setPurItems((prev) => [
-                      ...prev,
-                      {
-                        productId: found.id,
-                        name: found.name,
-                        variantName: found.variantName,
-                        barcode: found.barcode,
-                        unit: found.unit,
-                        qty: 1,
-                        mrp: found.mrp,
-                        retailPrice: found.retailPrice,
-                        purchasePrice: found.purchasePrice || found.retailPrice,
-                        gst: found.gst,
-                        cess: found.cess,
-                        hsn: found.hsn,
-                        discount: 0,
-                      },
-                    ]);
-                  } else {
-                    setQaBarcode(code);
-                    setQuickAddOpen(true);
-                  }
-                })
+                onOpenScanner(
+                  (code, visionResult) => {
+                    if (visionResult?.items && visionResult.items.length > 0) {
+                      const scannedItems: OrderLineItem[] = visionResult.items.map((it, idx) => {
+                        const itemCode = it.imei || it.barcode || '';
+                        const matched = products.find(
+                          (p) =>
+                            (itemCode && p.barcode === itemCode) ||
+                            (it.name && p.name.toLowerCase() === it.name.toLowerCase())
+                        );
+                        return {
+                          productId: matched?.id || `aiscan_${Date.now()}_${idx}`,
+                          name: matched?.name || it.name || `Scanned Item ${itemCode}`,
+                          variantName: matched?.variantName || '',
+                          barcode: matched?.barcode || itemCode,
+                          unit: matched?.unit || it.unit || 'Piece',
+                          qty: it.qty || 1,
+                          mrp: it.mrp || it.price || matched?.mrp || 0,
+                          retailPrice: it.price || matched?.retailPrice || 0,
+                          purchasePrice: it.price || matched?.purchasePrice || matched?.retailPrice || 0,
+                          gst: matched?.gst || 0,
+                          cess: matched?.cess || 0,
+                          hsn: matched?.hsn || '',
+                          discount: 0,
+                        };
+                      });
+                      setPurItems((prev) => [...prev, ...scannedItems]);
+                      return;
+                    }
+
+                    const found = products.find((p) => p.barcode === code);
+                    if (found) {
+                      setPurItems((prev) => [
+                        ...prev,
+                        {
+                          productId: found.id,
+                          name: found.name,
+                          variantName: found.variantName,
+                          barcode: found.barcode,
+                          unit: found.unit,
+                          qty: visionResult?.qty || 1,
+                          mrp: found.mrp,
+                          retailPrice: found.retailPrice,
+                          purchasePrice: found.purchasePrice || found.retailPrice,
+                          gst: found.gst,
+                          cess: found.cess,
+                          hsn: found.hsn,
+                          discount: 0,
+                        },
+                      ]);
+                    } else {
+                      setQaBarcode(code);
+                      if (visionResult?.productName) setQaName(visionResult.productName);
+                      if (visionResult?.mrp || visionResult?.price) {
+                        const p = String(visionResult.mrp || visionResult.price);
+                        setQaMrp(p);
+                        setQaRetail(String(visionResult.price || visionResult.mrp));
+                        setQaPurchasePrice(String(visionResult.price || visionResult.mrp));
+                      }
+                      if (visionResult?.qty) setQaQty(String(visionResult.qty));
+                      setQuickAddOpen(true);
+                    }
+                  },
+                  { scanMode: 'bill_items', title: 'AI Bill, Barcode & IMEI Scan' }
+                )
               }
               className="relative bg-gradient-to-r from-purple-600 to-indigo-500 text-white text-xs font-bold px-3.5 py-2 rounded-full flex items-center gap-1.5 shadow-md"
             >
@@ -742,11 +799,11 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
 
             <button
               type="button"
-              onClick={handleStartVoiceEntry}
+              onClick={() => handleStartVoiceEntry('purchase')}
               className="bg-purple-100 border border-purple-300 text-purple-800 text-xs font-bold px-3.5 py-2 rounded-full flex items-center gap-1.5 shadow-xs"
             >
               <Mic className="w-3.5 h-3.5" />
-              <span>{voiceListening ? 'Listening...' : 'AI VOICE'}</span>
+              <span>AI VOICE</span>
             </button>
           </div>
 
@@ -1110,6 +1167,21 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
             </div>
           </div>
         )}
+
+        <SmartVoiceModal
+          isOpen={voiceModalOpen}
+          onClose={() => setVoiceModalOpen(false)}
+          context={voiceContext}
+          onVoiceApplied={handleVoiceResultApplied}
+          title="🎙️ AI Voice Purchase Entry"
+        />
+
+        <ApkPhotoSheet
+          isOpen={photoSheetTarget === 'purchase_bill'}
+          onClose={() => setPhotoSheetTarget(null)}
+          title="Attach Supplier Bill Photo"
+          onUploaded={(url) => setPurBillUrl(url)}
+        />
       </div>
     );
   }
@@ -1304,7 +1376,11 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
         <div className="p-4 space-y-4 max-w-md mx-auto w-full">
           {/* Top Product Card: Image + Product Name + Quantity + Unit */}
           <div className="flex items-start gap-3">
-            <label className="w-24 h-24 rounded-2xl bg-white border border-slate-200 flex flex-col items-center justify-center cursor-pointer overflow-hidden shadow-xs shrink-0 relative">
+            <button
+              type="button"
+              onClick={() => setPhotoSheetTarget('manual_product')}
+              className="w-24 h-24 rounded-2xl bg-white border border-slate-200 flex flex-col items-center justify-center cursor-pointer overflow-hidden shadow-xs shrink-0 relative"
+            >
               {manualImageUrl ? (
                 <img
                   src={manualImageUrl}
@@ -1314,30 +1390,13 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
                 />
               ) : (
                 <div className="flex flex-col items-center text-center p-2">
-                  <span className="text-3xl">🧺</span>
-                  <span className="text-[9px] text-slate-400 font-semibold mt-1">
+                  <Camera className="w-6 h-6 text-[#0A2540]" />
+                  <span className="text-[10px] text-slate-500 font-bold mt-1">
                     {uploadingImage ? 'Uploading...' : 'Tap Photo'}
                   </span>
                 </div>
               )}
-              <input
-                type="file"
-                accept="image/*"
-                className="hidden"
-                onChange={async (e) => {
-                  const file = e.target.files?.[0];
-                  if (file) {
-                    setUploadingImage(true);
-                    try {
-                      const url = await uploadImageToCloudinary(file);
-                      setManualImageUrl(url);
-                    } finally {
-                      setUploadingImage(false);
-                    }
-                  }
-                }}
-              />
-            </label>
+            </button>
 
             <div className="flex-1 space-y-2.5">
               <input
@@ -1850,6 +1909,16 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
             </div>
           </div>
         )}
+
+        <ApkPhotoSheet
+          isOpen={photoSheetTarget === 'manual_product'}
+          onClose={() => setPhotoSheetTarget(null)}
+          title="Product Photo (Camera / Gallery)"
+          onUploaded={(url) => {
+            setUploadingImage(false);
+            setManualImageUrl(url);
+          }}
+        />
       </div>
     );
   }
@@ -1948,12 +2017,13 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
           </button>
         </div>
 
-        {/* Search Bar with Inline Barcode Scanner & Filter */}
+        {/* Search Bar with Inline Barcode Scanner, Voice Search & Filter */}
         <div className="bg-white rounded-2xl border border-slate-200 p-2 flex items-center gap-2 shadow-xs">
           <button
             type="button"
             onClick={() => onOpenScanner((code) => setSearchQuery(code))}
             className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center text-slate-700 shrink-0 active:scale-95"
+            title="Scan Barcode / IMEI"
           >
             <ScanLine className="w-5 h-5" />
           </button>
@@ -1961,9 +2031,17 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search by name or barco..."
+            placeholder="Search by name or barcode"
             className="flex-1 text-sm text-slate-800 outline-none bg-transparent"
           />
+          <button
+            type="button"
+            onClick={() => handleStartVoiceEntry('search')}
+            className="w-10 h-10 rounded-xl bg-purple-50 flex items-center justify-center text-purple-700 shrink-0 active:scale-95"
+            title="Voice Search Stock"
+          >
+            <Mic className="w-4 h-4" />
+          </button>
           <button
             type="button"
             onClick={() => setSortAsc(!sortAsc)}
@@ -2166,6 +2244,14 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
         <ShoppingCart className="w-4 h-4" />
         <span>Add Product</span>
       </button>
+
+      <SmartVoiceModal
+        isOpen={voiceModalOpen}
+        onClose={() => setVoiceModalOpen(false)}
+        context={voiceContext}
+        onVoiceApplied={handleVoiceResultApplied}
+        title="🎙️ Voice Search Stock"
+      />
     </div>
   );
 };
