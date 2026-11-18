@@ -36,6 +36,7 @@ import {
   Youtube,
   Instagram,
   CloudUpload,
+  AlertCircle,
 } from 'lucide-react';
 import { updatePassword, signOut } from 'firebase/auth';
 import {
@@ -77,9 +78,24 @@ export const OnlineShopScreen: React.FC<OnlineShopProps> = ({ uid, profile }) =>
   const [customDomain, setCustomDomain] = useState('');
   const [saving, setSaving] = useState(false);
   const [savedToast, setSavedToast] = useState(false);
+  const [storeErr, setStoreErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    const cfg = profile.config?.onlineStore;
+    if (cfg) {
+      setOnlineStore(cfg.onlineStoreEnabled ?? false);
+      setShowOutOfStock(cfg.showOutOfStock ?? false);
+      setCodEnabled(cfg.cashOnDelivery ?? true);
+      setNewOrderAlerts(cfg.newOrderAlerts ?? true);
+      setShowLowStockLabel(cfg.showLowStockLabel ?? false);
+      setAdvancePayment(cfg.advancePayment ?? false);
+      setAllowCancellation(cfg.allowOrderCancellation ?? false);
+    }
+  }, [profile.config?.onlineStore]);
 
   const handleUpdateStore = async () => {
     setSaving(true);
+    setStoreErr(null);
     try {
       await updateUserProfile(uid, {
         config: {
@@ -97,6 +113,8 @@ export const OnlineShopScreen: React.FC<OnlineShopProps> = ({ uid, profile }) =>
       });
       setSavedToast(true);
       setTimeout(() => setSavedToast(false), 2500);
+    } catch (err: any) {
+      setStoreErr(err?.message || 'Could not update online store settings');
     } finally {
       setSaving(false);
     }
@@ -314,6 +332,13 @@ export const OnlineShopScreen: React.FC<OnlineShopProps> = ({ uid, profile }) =>
           />
         </div>
 
+        {storeErr && (
+          <div className="bg-red-600 text-white text-xs font-bold px-4 py-3 rounded-xl flex items-center gap-2 shadow-md">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{storeErr}</span>
+          </div>
+        )}
+
         {savedToast && (
           <div className="bg-emerald-600 text-white text-xs font-bold px-4 py-3 rounded-xl flex items-center gap-2 shadow-md">
             <CheckCircle2 className="w-4 h-4" />
@@ -414,6 +439,24 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
   const [staffPhone, setStaffPhone] = useState('');
   const [staffRole, setStaffRole] = useState('Sales');
   const [staffSalary, setStaffSalary] = useState('');
+  const [savingStaff, setSavingStaff] = useState(false);
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const showToast = (text: string, type: 'success' | 'error' = 'success') => {
+    setToast({ type, text });
+    setTimeout(() => {
+      setToast((prev) => (prev?.text === text ? null : prev));
+    }, 3200);
+  };
+
+  useEffect(() => {
+    setOwnerName(profile.ownerName || '');
+    setShopName(profile.shopName || 'SmartBill CM');
+    setAddress(profile.address || '');
+    setGstNumber(profile.gstNumber || '');
+    setLogoUrl(profile.logoUrl || '');
+    setSelectedLang(profile.language || 'en');
+  }, [profile]);
 
   const SYNC_MODULES = [
     'Stocks',
@@ -456,7 +499,12 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
   useEffect(() => {
     if (subScreen === 'syncing_language' && syncStep === 20) {
       const timer = setTimeout(async () => {
-        await updateUserProfile(uid, { language: selectedLang });
+        try {
+          await updateUserProfile(uid, { language: selectedLang });
+          showToast('Language updated!');
+        } catch (err: any) {
+          showToast(err?.message || 'Failed to update language', 'error');
+        }
         setSubScreen('more');
       }, 380);
       return () => clearTimeout(timer);
@@ -470,22 +518,32 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
     try {
       setLogoUrl(url);
       await updateUserProfile(uid, { logoUrl: url });
+      showToast('Shop logo updated!');
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to upload logo', 'error');
     } finally {
       setUploadingLogo(false);
     }
   };
 
   const handleSaveShopDetails = async () => {
+    if (!shopName.trim()) {
+      showToast('Please enter Shop Name', 'error');
+      return;
+    }
     setSavingShop(true);
     try {
       await updateUserProfile(uid, {
         ownerName: ownerName.trim(),
-        shopName: shopName.trim() || 'Shop Name',
+        shopName: shopName.trim() || 'SmartBill CM',
         address: address.trim(),
         gstNumber: gstNumber.trim(),
         logoUrl,
       });
+      showToast('Shop details updated!');
       setSubScreen('account');
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to save shop details', 'error');
     } finally {
       setSavingShop(false);
     }
@@ -517,19 +575,30 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
   };
 
   const handleAddStaff = async () => {
-    if (!staffName.trim()) return;
-    const todayStr = new Date().toISOString().slice(0, 10);
-    await saveStaffToDb(uid, {
-      name: staffName.trim(),
-      phone: staffPhone.trim() || '+91',
-      role: staffRole,
-      salary: Number(staffSalary) || 0,
-      commissionPct: 0,
-      attendance: [{ dateStr: todayStr, status: 'Present' }],
-    });
-    setStaffName('');
-    setStaffPhone('');
-    setStaffSalary('');
+    if (!staffName.trim()) {
+      showToast('Please enter Staff Name', 'error');
+      return;
+    }
+    setSavingStaff(true);
+    try {
+      const todayStr = new Date().toISOString().slice(0, 10);
+      await saveStaffToDb(uid, {
+        name: staffName.trim(),
+        phone: staffPhone.trim() || '+91',
+        role: staffRole,
+        salary: Number(staffSalary) || 0,
+        commissionPct: 0,
+        attendance: [{ dateStr: todayStr, status: 'Present' }],
+      });
+      setStaffName('');
+      setStaffPhone('');
+      setStaffSalary('');
+      showToast('Staff member added!');
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to add staff member', 'error');
+    } finally {
+      setSavingStaff(false);
+    }
   };
 
   // Live Dashboard Metrics
@@ -544,15 +613,17 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
     .filter((o) => o.paymentMode === 'Cash')
     .reduce((s, o) => s + (Number(o.paidAmount) || 0), 0);
   const cashInBank = orders
-    .filter((o) => o.paymentMode === 'Online' || o.paymentMode === 'Card')
+    .filter((o) => o.paymentMode === 'Online' || o.paymentMode === 'Card' || o.paymentMode === 'UPI')
     .reduce((s, o) => s + (Number(o.paidAmount) || 0), 0);
+
+  let screenContent: React.ReactNode = null;
 
   // --------------------------------------------------------------------------
   // SUB-SCREEN: SmartBill CM Syncing... 0 of 20 (06:18 - 06:58)
   // --------------------------------------------------------------------------
   if (subScreen === 'syncing_language') {
     const pct = Math.round((syncStep / 20) * 100);
-    return (
+    screenContent = (
       <div className="min-h-screen bg-[#0A2540] text-white flex flex-col items-center justify-center p-6">
         <div className="w-full max-w-sm bg-white/10 backdrop-blur-md border border-white/15 rounded-3xl p-6 space-y-5">
           <div className="flex items-center justify-between">
@@ -607,14 +678,14 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
   // --------------------------------------------------------------------------
   // SUB-SCREEN: Change Language (06:15)
   // --------------------------------------------------------------------------
-  if (subScreen === 'change_language') {
+  else if (subScreen === 'change_language') {
     const languages: { code: LanguageCode; label: string; native: string }[] = [
       { code: 'en', label: 'English', native: 'English' },
       { code: 'hi', label: 'Hindi', native: 'हिंदी' },
       { code: 'gu', label: 'Gujarati', native: 'ગુજરાતી' },
       { code: 'mr', label: 'Marathi', native: 'मराठी' },
     ];
-    return (
+    screenContent = (
       <div className="min-h-screen bg-[#F4F6F9] flex flex-col">
         <div className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3">
           <button onClick={() => setSubScreen('account')} className="p-1">
@@ -666,8 +737,8 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
   // --------------------------------------------------------------------------
   // SUB-SCREEN: Dashboard (05:27)
   // --------------------------------------------------------------------------
-  if (subScreen === 'dashboard') {
-    return (
+  else if (subScreen === 'dashboard') {
+    screenContent = (
       <div className="min-h-screen bg-[#F4F6F9] flex flex-col">
         <div className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3">
           <button onClick={() => setSubScreen('more')} className="p-1">
@@ -760,8 +831,8 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
   // --------------------------------------------------------------------------
   // SUB-SCREEN: Shop Details (05:45)
   // --------------------------------------------------------------------------
-  if (subScreen === 'shop_details') {
-    return (
+  else if (subScreen === 'shop_details') {
+    screenContent = (
       <div className="min-h-screen bg-[#F4F6F9] flex flex-col">
         <div className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3">
           <button onClick={() => setSubScreen('account')} className="p-1">
@@ -873,8 +944,8 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
   // --------------------------------------------------------------------------
   // SUB-SCREEN: My Subscription (05:56)
   // --------------------------------------------------------------------------
-  if (subScreen === 'subscription') {
-    return (
+  else if (subScreen === 'subscription') {
+    screenContent = (
       <div className="min-h-screen bg-[#F4F6F9] flex flex-col">
         <div className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3">
           <button onClick={() => setSubScreen('account')} className="p-1">
@@ -923,8 +994,16 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
   // --------------------------------------------------------------------------
   // SUB-SCREEN: Your Devices (06:00)
   // --------------------------------------------------------------------------
-  if (subScreen === 'devices') {
-    return (
+  else if (subScreen === 'devices') {
+    const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+    const isAndroid = /Android/i.test(ua);
+    const isIos = /iPhone|iPad|iPod/i.test(ua);
+    const currentTabMatches =
+      (deviceTab === 'android' && isAndroid) ||
+      (deviceTab === 'ios' && isIos) ||
+      (deviceTab === 'desktop' && !isAndroid && !isIos);
+
+    screenContent = (
       <div className="min-h-screen bg-[#F4F6F9] flex flex-col">
         <div className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3">
           <button onClick={() => setSubScreen('account')} className="p-1">
@@ -937,7 +1016,7 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
           <div className="bg-white rounded-2xl p-4 border border-slate-100 shadow-xs flex items-center justify-between">
             <span className="text-sm font-bold text-slate-700">Total Active Devices</span>
             <span className="px-3 py-1 rounded-full bg-[#0A2540] text-white text-xs font-extrabold tabular-nums">
-              2
+              1
             </span>
           </div>
 
@@ -955,14 +1034,16 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
             ))}
           </div>
 
-          {deviceTab === 'android' ? (
+          {currentTabMatches ? (
             <div className="bg-white rounded-2xl p-4 border border-slate-100 shadow-xs flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center">
                   <Smartphone className="w-5 h-5" />
                 </div>
                 <div>
-                  <p className="text-sm font-bold text-slate-800">samsung SM-M356B</p>
+                  <p className="text-sm font-bold text-slate-800">
+                    {isAndroid ? 'Android App / WebView' : isIos ? 'iOS Device' : 'Desktop Browser'}
+                  </p>
                   <p className="text-xs text-emerald-600 font-semibold">This Device • Online</p>
                 </div>
               </div>
@@ -981,8 +1062,9 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
   // --------------------------------------------------------------------------
   // SUB-SCREEN: Offline Mode Radar Screen (06:06 - 06:12)
   // --------------------------------------------------------------------------
-  if (subScreen === 'offline_mode') {
-    return (
+  else if (subScreen === 'offline_mode') {
+    const isOfflineOn = Boolean(profile.config?.offlineMode);
+    screenContent = (
       <div className="min-h-screen bg-[#071A2E] text-white flex flex-col">
         <div className="px-4 py-3.5 flex items-center gap-3">
           <button onClick={() => setSubScreen('account')} className="p-1">
@@ -1000,17 +1082,32 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
             </div>
           </div>
 
-          <h2 className="text-xl font-extrabold">Offline mode is off</h2>
+          <h2 className="text-xl font-extrabold">
+            {isOfflineOn ? 'Offline mode is ON' : 'Offline mode is off'}
+          </h2>
           <p className="text-xs text-slate-300 max-w-xs mt-2 leading-relaxed">
             Create bills even without internet connection. Invoices automatically sync when back
             online.
           </p>
 
           <button
-            onClick={() => setShowOfflineStaffModal(true)}
+            onClick={async () => {
+              if (isOfflineOn) {
+                try {
+                  await updateUserProfile(uid, {
+                    config: { ...profile.config, offlineMode: false },
+                  });
+                  showToast('Offline mode turned off');
+                } catch (err: any) {
+                  showToast(err?.message || 'Could not update offline mode', 'error');
+                }
+              } else {
+                setShowOfflineStaffModal(true);
+              }
+            }}
             className="mt-8 w-full max-w-xs bg-teal-500 hover:bg-teal-400 text-[#071A2E] font-extrabold py-3.5 rounded-xl text-sm shadow-lg transition"
           >
-            Turn on offline mode
+            {isOfflineOn ? 'Turn off offline mode' : 'Turn on offline mode'}
           </button>
         </div>
 
@@ -1026,7 +1123,15 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
               </p>
               <div className="flex flex-col gap-2 pt-1">
                 <button
-                  onClick={() => {
+                  onClick={async () => {
+                    try {
+                      await updateUserProfile(uid, {
+                        config: { ...profile.config, offlineMode: true },
+                      });
+                      showToast('Offline mode enabled');
+                    } catch {
+                      // continue to settings
+                    }
                     setShowOfflineStaffModal(false);
                     if (onOpenInvoicingSettings) {
                       onOpenInvoicingSettings();
@@ -1034,7 +1139,7 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
                   }}
                   className="w-full bg-[#0A2540] text-white font-bold py-3 rounded-xl text-xs"
                 >
-                  Open invoicing settings
+                  Enable & Open Invoicing Settings
                 </button>
                 <button
                   onClick={() => setShowOfflineStaffModal(false)}
@@ -1053,9 +1158,9 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
   // --------------------------------------------------------------------------
   // SUB-SCREEN: Manage Staff & Attendance
   // --------------------------------------------------------------------------
-  if (subScreen === 'manage_staff') {
+  else if (subScreen === 'manage_staff') {
     const todayStr = new Date().toISOString().slice(0, 10);
-    return (
+    screenContent = (
       <div className="min-h-screen bg-[#F4F6F9] flex flex-col">
         <div className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3">
           <button onClick={() => setSubScreen('more')} className="p-1">
@@ -1101,10 +1206,11 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
             </div>
             <button
               onClick={handleAddStaff}
-              className="w-full bg-[#0A2540] text-white font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5"
+              disabled={savingStaff}
+              className="w-full bg-[#0A2540] text-white font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5 disabled:opacity-50"
             >
               <Plus className="w-4 h-4" />
-              Add Staff to Shop
+              {savingStaff ? 'Saving...' : 'Add Staff to Shop'}
             </button>
           </div>
 
@@ -1129,15 +1235,20 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
                       </p>
                     </div>
                     <button
-                      onClick={() => {
+                      onClick={async () => {
                         const nextStatus = status === 'Present' ? 'Absent' : 'Present';
                         const filtered = (st.attendance || []).filter(
                           (a) => a.dateStr !== todayStr
                         );
-                        saveStaffToDb(uid, {
-                          ...st,
-                          attendance: [...filtered, { dateStr: todayStr, status: nextStatus }],
-                        });
+                        try {
+                          await saveStaffToDb(uid, {
+                            ...st,
+                            attendance: [...filtered, { dateStr: todayStr, status: nextStatus }],
+                          });
+                          showToast(`${st.name} marked ${nextStatus}`);
+                        } catch (err: any) {
+                          showToast(err?.message || 'Failed to update attendance', 'error');
+                        }
                       }}
                       className={`px-3 py-1.5 rounded-lg text-xs font-bold ${
                         status === 'Present'
@@ -1160,7 +1271,7 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
   // --------------------------------------------------------------------------
   // SUB-SCREEN: Account Settings Hub (05:40 - 07:05)
   // --------------------------------------------------------------------------
-  if (subScreen === 'account') {
+  else if (subScreen === 'account') {
     const accountItems = [
       {
         title: 'Shop details',
@@ -1213,7 +1324,7 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
       },
     ];
 
-    return (
+    screenContent = (
       <div className="min-h-screen bg-[#F4F6F9] flex flex-col">
         <div className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3 sticky top-0 z-20">
           <button onClick={() => setSubScreen('more')} className="p-1">
@@ -1355,6 +1466,7 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
   // --------------------------------------------------------------------------
   // DEFAULT MORE TAB SCREEN (05:19 - 05:39)
   // --------------------------------------------------------------------------
+  else {
   const settingsTools = [
     { label: 'Account', icon: User, action: () => setSubScreen('account') },
     { label: 'Multiple Shops', icon: Store, action: () => setSubScreen('shop_details') },
@@ -1371,7 +1483,7 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
     { label: 'Plugins', icon: Puzzle, action: () => setSubScreen('account') },
   ];
 
-  return (
+  screenContent = (
     <div className="min-h-screen bg-[#F4F6F9] flex flex-col pb-24">
       <div className="p-3.5 space-y-3.5">
         {/* Top Shop Profile Card */}
@@ -1406,7 +1518,7 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
           </div>
 
           <div className="bg-amber-50 border border-amber-200/80 rounded-xl px-3.5 py-2.5 flex items-center justify-between">
-            <span className="text-xs font-bold text-amber-900">Trail expires in 2 days</span>
+            <span className="text-xs font-bold text-amber-900">Trial expires in 2 days</span>
             <button
               onClick={() => setSubScreen('subscription')}
               className="px-3 py-1 rounded-lg bg-[#0A2540] text-white text-xs font-bold"
@@ -1550,7 +1662,7 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
               },
               {
                 label: 'Contact us on instagram',
-                sub: 'Follow @billingfast for tips & updates',
+                sub: 'Follow @smartbillcm for tips & updates',
                 icon: Instagram,
                 href: 'https://www.instagram.com',
                 color: 'bg-purple-50 text-purple-700',
@@ -1584,5 +1696,29 @@ export const MoreAndSettingsScreen: React.FC<MoreAndSettingsProps> = ({
         </div>
       )}
     </div>
+  );
+  }
+
+  return (
+    <>
+      {screenContent}
+      {toast && (
+        <div
+          className={`fixed top-16 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 rounded-2xl shadow-xl flex items-center gap-2 text-xs font-bold max-w-xs w-[90%] ${
+            toast.type === 'error' ? 'bg-red-600 text-white' : 'bg-[#0A2540] text-white'
+          }`}
+        >
+          {toast.type === 'error' ? (
+            <AlertCircle className="w-4 h-4 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <span className="flex-1">{toast.text}</span>
+          <button type="button" onClick={() => setToast(null)}>
+            <X className="w-3.5 h-3.5 opacity-80" />
+          </button>
+        </div>
+      )}
+    </>
   );
 };

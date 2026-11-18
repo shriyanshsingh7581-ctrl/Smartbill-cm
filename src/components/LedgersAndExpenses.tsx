@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   ChevronLeft,
   Search,
@@ -14,6 +14,9 @@ import {
   MoreVertical,
   History,
   Pencil,
+  CheckCircle2,
+  AlertCircle,
+  X,
 } from 'lucide-react';
 import {
   saveSupplierToDb,
@@ -79,17 +82,26 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
   const [txType, setTxType] = useState<'PAYMENT' | 'PURCHASE'>('PAYMENT');
   const [txNotes, setTxNotes] = useState('');
 
+  const now = new Date();
+  const todayIso = now.toISOString().slice(0, 10);
+  const todayDdMmYyyy = `${String(now.getDate()).padStart(2, '0')}-${String(
+    now.getMonth() + 1
+  ).padStart(2, '0')}-${now.getFullYear()}`;
+
   // Column filters for Ledger Summary table
   const [colFilterDate, setColFilterDate] = useState('');
   const [colFilterName, setColFilterName] = useState('');
   const [colFilterPhone, setColFilterPhone] = useState('');
+  const [colFilterAmount, setColFilterAmount] = useState('');
 
-  // Add Expense Modal & Custom Calendar Modal (Matches 01:30 - 01:39)
+  // Add Expense Modal & Dynamic Calendar Modal
   const [addExpenseOpen, setAddExpenseOpen] = useState(false);
   const [expTitle, setExpTitle] = useState('');
   const [expDate, setExpDate] = useState('');
   const [calendarModalOpen, setCalendarModalOpen] = useState(false);
-  const [selectedDayNum, setSelectedDayNum] = useState(17);
+  const [calMonth, setCalMonth] = useState(now.getMonth());
+  const [calYear, setCalYear] = useState(now.getFullYear());
+  const [selectedDayNum, setSelectedDayNum] = useState(now.getDate());
   const [expCategory, setExpCategory] = useState('Food');
   const [expItems, setExpItems] = useState<{ name: string; amount: number }[]>([]);
   const [expPaymentMethod, setExpPaymentMethod] = useState('Cash');
@@ -97,17 +109,35 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
   const [expNotes, setExpNotes] = useState('');
   const [expTotalAmount, setExpTotalAmount] = useState('0.00');
   const [savingExpense, setSavingExpense] = useState(false);
+  const [savingTx, setSavingTx] = useState(false);
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const partySearchRef = useRef<HTMLInputElement | null>(null);
+
+  const showToast = (text: string, type: 'success' | 'error' = 'success') => {
+    setToast({ type, text });
+    setTimeout(() => {
+      setToast((prev) => (prev?.text === text ? null : prev));
+    }, 3200);
+  };
+
+  useEffect(() => {
+    if (initialOpenAddModal) {
+      setAddPartyOpen(true);
+    }
+  }, [initialOpenAddModal]);
 
   const openLedgerSummaryWithLoader = (target: 'supplier_ledger_summary' | 'customer_ledger_summary') => {
     setPreparingLedger(true);
     setTimeout(() => {
       setPreparingLedger(false);
       setScreen(target);
-    }, 450);
+    }, 350);
   };
 
+  let screenContent: React.ReactNode = null;
+
   if (preparingLedger) {
-    return (
+    screenContent = (
       <div className="min-h-screen bg-white flex flex-col items-center justify-center p-6">
         <p className="text-sm font-semibold text-slate-800 mb-2">
           {screen === 'suppliers'
@@ -124,7 +154,7 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
   // ============================================================================
   // 1. SUPPLIER / CUSTOMER LEDGER SUMMARY TABLE (Matches 09:23 & 09:51)
   // ============================================================================
-  if (screen === 'supplier_ledger_summary' || screen === 'customer_ledger_summary') {
+  else if (screen === 'supplier_ledger_summary' || screen === 'customer_ledger_summary') {
     const isSupplier = screen === 'supplier_ledger_summary';
     const list = isSupplier ? suppliers : customers;
 
@@ -144,11 +174,12 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
       if (colFilterName && !r.name.toLowerCase().includes(colFilterName.toLowerCase())) return false;
       if (colFilterPhone && !r.phone.toLowerCase().includes(colFilterPhone.toLowerCase()))
         return false;
+      if (colFilterAmount && !String(r.amount).includes(colFilterAmount.trim())) return false;
       if (searchQuery && !r.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
       return true;
     });
 
-    return (
+    screenContent = (
       <div className="min-h-screen bg-[#FAF9F5] flex flex-col">
         <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center justify-between sticky top-0 z-30">
           <div className="flex items-center gap-3">
@@ -163,7 +194,20 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
               {isSupplier ? 'Supplier Ledger Summ...' : 'Customer Ledger Sum...'}
             </h1>
           </div>
-          <MoreVertical className="w-5 h-5" />
+          <button
+            type="button"
+            onClick={() => {
+              setColFilterDate('');
+              setColFilterName('');
+              setColFilterPhone('');
+              setColFilterAmount('');
+              setSearchQuery('');
+              showToast('Table filters cleared');
+            }}
+            title="Clear Filters"
+          >
+            <MoreVertical className="w-5 h-5" />
+          </button>
         </header>
 
         <div className="p-4 space-y-3 max-w-md mx-auto w-full flex-1 flex flex-col">
@@ -253,6 +297,8 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
                   <th className="p-2">
                     <input
                       type="text"
+                      value={colFilterAmount}
+                      onChange={(e) => setColFilterAmount(e.target.value)}
                       placeholder="Contains"
                       className="w-full bg-transparent text-xs font-normal outline-none"
                     />
@@ -260,14 +306,22 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
                 </tr>
               </thead>
               <tbody>
-                {filteredRows.map((row, idx) => (
-                  <tr key={idx} className="border-b border-slate-100 text-xs text-slate-800">
-                    <td className="p-2.5 border-r border-slate-100 tabular-nums">{row.date}</td>
-                    <td className="p-2.5 border-r border-slate-100 font-semibold">{row.name}</td>
-                    <td className="p-2.5 border-r border-slate-100 tabular-nums">{row.phone}</td>
-                    <td className="p-2.5 font-bold tabular-nums">₹{row.amount}</td>
+                {filteredRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="p-8 text-center text-xs text-slate-400">
+                      No ledger transactions recorded yet
+                    </td>
                   </tr>
-                ))}
+                ) : (
+                  filteredRows.map((row, idx) => (
+                    <tr key={idx} className="border-b border-slate-100 text-xs text-slate-800">
+                      <td className="p-2.5 border-r border-slate-100 tabular-nums">{row.date}</td>
+                      <td className="p-2.5 border-r border-slate-100 font-semibold">{row.name}</td>
+                      <td className="p-2.5 border-r border-slate-100 tabular-nums">{row.phone}</td>
+                      <td className="p-2.5 font-bold tabular-nums">₹{row.amount}</td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -279,18 +333,21 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
   // ============================================================================
   // 2. EXPENSES MODULE (Matches 01:27 - 01:40)
   // ============================================================================
-  if (screen === 'expenses') {
+  else if (screen === 'expenses') {
     const filteredExpenses = expenses.filter(
       (e) => !searchQuery.trim() || e.title.toLowerCase().includes(searchQuery.toLowerCase())
     );
 
     const handleSaveExpense = async () => {
-      if (!expTitle.trim()) return;
+      if (!expTitle.trim()) {
+        showToast('Please enter Expense Title', 'error');
+        return;
+      }
       setSavingExpense(true);
       try {
         await saveExpenseToDb(uid, {
           title: expTitle.trim(),
-          dateStr: expDate || '17-11-2026',
+          dateStr: expDate || todayDdMmYyyy,
           category: expCategory,
           paymentMethod: expPaymentMethod,
           notes: expNotes.trim(),
@@ -303,12 +360,29 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
         setExpTotalAmount('0.00');
         setExpItems([]);
         setAddExpenseOpen(false);
+        showToast('Expense saved successfully!');
+      } catch (err: any) {
+        showToast(err?.message || 'Could not save expense. Please try again.', 'error');
       } finally {
         setSavingExpense(false);
       }
     };
 
-    return (
+    const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
+    const firstWeekday = new Date(calYear, calMonth, 1).getDay();
+    const clampedDay = Math.min(selectedDayNum, daysInMonth);
+    const selectedCalDate = new Date(calYear, calMonth, clampedDay);
+    const monthLabel = selectedCalDate.toLocaleDateString('en-US', {
+      month: 'long',
+      year: 'numeric',
+    });
+    const selectedCalTitle = selectedCalDate.toLocaleDateString('en-US', {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+    });
+
+    screenContent = (
       <div className="min-h-screen bg-[#FAF9F5] flex flex-col pb-24">
         {/* Top Navy Header */}
         <header className="bg-[#0A2540] text-white px-4 py-3 flex items-center gap-3 sticky top-0 z-30">
@@ -332,7 +406,7 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
               <Calendar className="w-4 h-4 text-slate-600" />
               <div>
                 <p className="text-xs font-extrabold text-[#0A2540]">Today</p>
-                <p className="text-[11px] text-slate-400 tabular-nums">2026-11-17</p>
+                <p className="text-[11px] text-slate-400 tabular-nums">{todayIso}</p>
               </div>
             </div>
             <SlidersHorizontal className="w-4 h-4 text-slate-600" />
@@ -572,23 +646,47 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
           </div>
         )}
 
-        {/* Material Calendar Modal (Matches 01:37) */}
+        {/* Material Calendar Modal */}
         {calendarModalOpen && (
           <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
             <div className="bg-white rounded-3xl p-5 w-full max-w-xs shadow-2xl space-y-4">
               <p className="text-xs text-slate-500">Select date</p>
               <div className="flex items-center justify-between border-b border-slate-200 pb-3">
-                <h3 className="text-2xl font-bold text-slate-900">
-                  Tue, Nov {selectedDayNum}
-                </h3>
+                <h3 className="text-2xl font-bold text-slate-900">{selectedCalTitle}</h3>
                 <Pencil className="w-4 h-4 text-slate-600" />
               </div>
 
               <div className="flex items-center justify-between text-xs font-semibold text-slate-700">
-                <span>November 2026 ▾</span>
-                <div className="flex items-center gap-4">
-                  <span>‹</span>
-                  <span>›</span>
+                <span>{monthLabel}</span>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (calMonth === 0) {
+                        setCalMonth(11);
+                        setCalYear((y) => y - 1);
+                      } else {
+                        setCalMonth((m) => m - 1);
+                      }
+                    }}
+                    className="w-7 h-7 rounded-full hover:bg-slate-100 flex items-center justify-center text-base"
+                  >
+                    ‹
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (calMonth === 11) {
+                        setCalMonth(0);
+                        setCalYear((y) => y + 1);
+                      } else {
+                        setCalMonth((m) => m + 1);
+                      }
+                    }}
+                    className="w-7 h-7 rounded-full hover:bg-slate-100 flex items-center justify-center text-base"
+                  >
+                    ›
+                  </button>
                 </div>
               </div>
 
@@ -598,13 +696,16 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
                     {d}
                   </div>
                 ))}
-                {Array.from({ length: 30 }, (_, i) => i + 1).map((day) => (
+                {Array.from({ length: firstWeekday }, (_, i) => (
+                  <div key={`empty-${i}`} />
+                ))}
+                {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((day) => (
                   <button
                     key={day}
                     type="button"
                     onClick={() => setSelectedDayNum(day)}
                     className={`w-8 h-8 rounded-full mx-auto flex items-center justify-center text-xs font-medium ${
-                      selectedDayNum === day
+                      clampedDay === day
                         ? 'bg-[#0A2540] text-white font-bold'
                         : 'text-slate-800 hover:bg-slate-100'
                     }`}
@@ -621,8 +722,9 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    const dd = String(selectedDayNum).padStart(2, '0');
-                    setExpDate(`${dd}-11-2026`);
+                    const dd = String(clampedDay).padStart(2, '0');
+                    const mm = String(calMonth + 1).padStart(2, '0');
+                    setExpDate(`${dd}-${mm}-${calYear}`);
                     setCalendarModalOpen(false);
                   }}
                 >
@@ -639,6 +741,7 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
   // ============================================================================
   // 3. MY SUPPLIERS & MY CUSTOMERS SCREENS (Matches 09:19 - 09:55)
   // ============================================================================
+  else {
   const isSupplierScreen = screen === 'suppliers';
   const partyList = isSupplierScreen ? suppliers : customers;
 
@@ -663,7 +766,17 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
     );
 
   const handleSaveParty = async () => {
-    if (!partyName.trim() || !partyPhone.trim()) return;
+    if (!partyName.trim()) {
+      showToast(
+        isSupplierScreen ? 'Please enter Supplier Name' : 'Please enter Customer Name',
+        'error'
+      );
+      return;
+    }
+    if (!partyPhone.trim()) {
+      showToast('Please enter Phone Number', 'error');
+      return;
+    }
     setSavingParty(true);
     try {
       const openAmt = Number(partyOpeningBal) || 0;
@@ -710,40 +823,55 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
       setPartyOpeningBal('');
       setAddPartyOpen(false);
       onClearInitialModal?.();
+      showToast(isSupplierScreen ? 'Supplier saved!' : 'Customer saved!');
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to save record. Please try again.', 'error');
     } finally {
       setSavingParty(false);
     }
   };
 
   const handleAddLedgerTransaction = async () => {
-    if (!selectedParty || !Number(txAmount)) return;
+    if (!selectedParty) return;
     const amt = Number(txAmount) || 0;
-    const delta = txType === 'PAYMENT' ? amt : -amt;
-    const newEntry: LedgerEntry = {
-      id: `tx_${Date.now()}`,
-      dateStr: new Date().toISOString().slice(0, 10),
-      timeStr: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      type: txType,
-      amount: amt,
-      mode: 'Cash',
-      notes: txNotes.trim() || txType,
-    };
-    const updatedParty = {
-      ...selectedParty,
-      balance: (selectedParty.balance || 0) + delta,
-      ledger: [newEntry, ...(selectedParty.ledger || [])],
-    };
-    if (isSupplierScreen) {
-      await saveSupplierToDb(uid, updatedParty);
-    } else {
-      await saveCustomerToDb(uid, updatedParty);
+    if (amt <= 0) {
+      showToast('Please enter a valid amount', 'error');
+      return;
     }
-    setSelectedParty(updatedParty);
-    setTxAmount('');
-    setTxNotes('');
+    setSavingTx(true);
+    try {
+      const delta = txType === 'PAYMENT' ? amt : -amt;
+      const newEntry: LedgerEntry = {
+        id: `tx_${Date.now()}`,
+        dateStr: new Date().toISOString().slice(0, 10),
+        timeStr: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        type: txType,
+        amount: amt,
+        mode: 'Cash',
+        notes: txNotes.trim() || txType,
+      };
+      const updatedParty = {
+        ...selectedParty,
+        balance: (selectedParty.balance || 0) + delta,
+        ledger: [newEntry, ...(selectedParty.ledger || [])],
+      };
+      if (isSupplierScreen) {
+        await saveSupplierToDb(uid, updatedParty);
+      } else {
+        await saveCustomerToDb(uid, updatedParty);
+      }
+      setSelectedParty(updatedParty);
+      setTxAmount('');
+      setTxNotes('');
+      showToast('Ledger entry added!');
+    } catch (err: any) {
+      showToast(err?.message || 'Could not update ledger.', 'error');
+    } finally {
+      setSavingTx(false);
+    }
   };
 
-  return (
+  screenContent = (
     <div className="min-h-screen bg-[#FAF9F5] flex flex-col pb-24">
       {/* Top Navy Header */}
       <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center justify-between sticky top-0 z-30">
@@ -756,18 +884,38 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
             <ChevronLeft className="w-5 h-5" />
           </button>
           <h1 className="text-base font-bold">
-            {isSupplierScreen ? 'My Supp...' : 'My Customers'}
+            {isSupplierScreen ? 'My Suppliers' : 'My Customers'}
           </h1>
         </div>
 
         {isSupplierScreen ? (
-          <div className="flex items-center gap-4 text-sm font-bold">
-            <Search className="w-4 h-4" />
-            <span>Tr</span>
-            <History className="w-4 h-4" />
+          <div className="flex items-center gap-3 text-sm font-bold">
+            <button
+              type="button"
+              onClick={() => partySearchRef.current?.focus()}
+              className="p-1"
+              title="Search"
+            >
+              <Search className="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              onClick={() => openLedgerSummaryWithLoader('supplier_ledger_summary')}
+              className="p-1"
+              title="Supplier Ledger Summary"
+            >
+              <History className="w-4 h-4" />
+            </button>
           </div>
         ) : (
-          <MoreVertical className="w-5 h-5" />
+          <button
+            type="button"
+            onClick={() => openLedgerSummaryWithLoader('customer_ledger_summary')}
+            className="p-1"
+            title="Customer Ledger Summary"
+          >
+            <MoreVertical className="w-5 h-5" />
+          </button>
         )}
       </header>
 
@@ -776,11 +924,12 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
         <div className="bg-white rounded-2xl border border-slate-200 px-4 py-3 flex items-center gap-3 shadow-xs">
           <Search className="w-4 h-4 text-slate-400" />
           <input
+            ref={partySearchRef}
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder={
-              isSupplierScreen ? 'Search suppliers by name or ...' : 'Search customers by na...'
+              isSupplierScreen ? 'Search suppliers by name or phone...' : 'Search customers by name or phone...'
             }
             className="flex-1 text-xs text-slate-800 outline-none"
           />
@@ -1089,52 +1238,66 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
               </button>
             </div>
 
-            <div className="grid grid-cols-3 gap-2">
+            <div className="space-y-2">
+              <div className="grid grid-cols-3 gap-2">
+                <input
+                  type="number"
+                  value={txAmount}
+                  onChange={(e) => setTxAmount(e.target.value)}
+                  placeholder="Amount ₹"
+                  className="border border-slate-300 rounded-xl px-3 py-2 text-xs"
+                />
+                <select
+                  value={txType}
+                  onChange={(e) => setTxType(e.target.value as 'PAYMENT' | 'PURCHASE')}
+                  className="border border-slate-300 rounded-xl px-2 py-2 text-xs font-bold"
+                >
+                  <option value="PAYMENT">You Gave (+)</option>
+                  <option value="PURCHASE">You Got (-)</option>
+                </select>
+                <button
+                  type="button"
+                  disabled={savingTx}
+                  onClick={handleAddLedgerTransaction}
+                  className="bg-[#0A2540] text-white text-xs font-bold rounded-xl py-2 disabled:opacity-50"
+                >
+                  {savingTx ? 'Saving...' : 'Add Entry'}
+                </button>
+              </div>
               <input
-                type="number"
-                value={txAmount}
-                onChange={(e) => setTxAmount(e.target.value)}
-                placeholder="Amount ₹"
-                className="border border-slate-300 rounded-xl px-3 py-2 text-xs"
+                type="text"
+                value={txNotes}
+                onChange={(e) => setTxNotes(e.target.value)}
+                placeholder="Notes (optional, e.g. UPI settlement)"
+                className="w-full border border-slate-200 rounded-xl px-3 py-2 text-xs outline-none"
               />
-              <select
-                value={txType}
-                onChange={(e) => setTxType(e.target.value as 'PAYMENT' | 'PURCHASE')}
-                className="border border-slate-300 rounded-xl px-2 py-2 text-xs font-bold"
-              >
-                <option value="PAYMENT">You Gave (+)</option>
-                <option value="PURCHASE">You Got (-)</option>
-              </select>
-              <button
-                type="button"
-                onClick={handleAddLedgerTransaction}
-                className="bg-[#0A2540] text-white text-xs font-bold rounded-xl py-2"
-              >
-                Add Entry
-              </button>
             </div>
 
             <div className="flex-1 overflow-y-auto space-y-2">
-              {(selectedParty.ledger || []).map((entry) => (
-                <div
-                  key={entry.id}
-                  className="bg-slate-50 rounded-xl p-3 flex items-center justify-between text-xs"
-                >
-                  <div>
-                    <p className="font-bold text-slate-800">{entry.notes || entry.type}</p>
-                    <p className="text-[10px] text-slate-400">
-                      {entry.dateStr} {entry.timeStr}
-                    </p>
-                  </div>
-                  <span
-                    className={`font-extrabold tabular-nums ${
-                      entry.type === 'PAYMENT' ? 'text-emerald-600' : 'text-red-600'
-                    }`}
+              {(selectedParty.ledger || []).length === 0 ? (
+                <p className="text-xs text-slate-400 text-center py-6">No transactions yet</p>
+              ) : (
+                (selectedParty.ledger || []).map((entry) => (
+                  <div
+                    key={entry.id}
+                    className="bg-slate-50 rounded-xl p-3 flex items-center justify-between text-xs"
                   >
-                    ₹{entry.amount}
-                  </span>
-                </div>
-              ))}
+                    <div>
+                      <p className="font-bold text-slate-800">{entry.notes || entry.type}</p>
+                      <p className="text-[10px] text-slate-400">
+                        {entry.dateStr} {entry.timeStr}
+                      </p>
+                    </div>
+                    <span
+                      className={`font-extrabold tabular-nums ${
+                        entry.type === 'PAYMENT' ? 'text-emerald-600' : 'text-red-600'
+                      }`}
+                    >
+                      ₹{entry.amount}
+                    </span>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         </div>
@@ -1147,5 +1310,29 @@ export const LedgersAndExpenses: React.FC<LedgersAndExpensesProps> = ({
         onUploaded={(url) => setPartyAvatar(url)}
       />
     </div>
+  );
+  }
+
+  return (
+    <>
+      {screenContent}
+      {toast && (
+        <div
+          className={`fixed top-16 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 rounded-2xl shadow-xl flex items-center gap-2 text-xs font-bold max-w-xs w-[90%] ${
+            toast.type === 'error' ? 'bg-red-600 text-white' : 'bg-[#0A2540] text-white'
+          }`}
+        >
+          {toast.type === 'error' ? (
+            <AlertCircle className="w-4 h-4 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <span className="flex-1">{toast.text}</span>
+          <button type="button" onClick={() => setToast(null)}>
+            <X className="w-3.5 h-3.5 opacity-80" />
+          </button>
+        </div>
+      )}
+    </>
   );
 };

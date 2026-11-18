@@ -108,16 +108,36 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
-// Sanitization helper to enforce maxLength constraints from firebase-blueprint.json
+// Sanitization helpers to enforce constraints from firebase-blueprint.json
 function cleanStr(val: string | undefined | null, maxLen: number, fallback = ''): string {
-  const str = (val ?? fallback).trim();
+  const trimmed = (val ?? '').trim();
+  const str = trimmed.length > 0 ? trimmed : fallback;
   return str.slice(0, maxLen);
+}
+
+function cleanUrl(val: string | undefined | null, fallback = ''): string {
+  const trimmed = (val ?? '').trim();
+  if (!trimmed) return fallback;
+  // Never persist truncated base64 data URIs that exceed the 500-char Firestore rule limit
+  if (trimmed.startsWith('data:') && trimmed.length > 500) {
+    return fallback;
+  }
+  return trimmed.slice(0, 500);
 }
 
 function cleanId(id?: string): string {
   const raw = id || `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   return raw.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
 }
+
+function isPersistedDocId(id?: string): boolean {
+  if (!id) return false;
+  const trimmed = id.trim();
+  if (!trimmed) return false;
+  return !/^(temp|voice|aiscan|quick|scan_pos|voice_pos)_/.test(trimmed);
+}
+
+const verifiedUserDocs = new Set<string>();
 
 export interface InvoiceSettingsConfig {
   paperSize: '2 inch' | '3 inch' | 'A4' | 'A5';
@@ -477,6 +497,7 @@ export async function ensureUserProfile(user: User, customPhone?: string, custom
   try {
     const snap = await getDoc(ref);
     if (snap.exists()) {
+      verifiedUserDocs.add(user.uid);
       const data = snap.data();
       let parsedConfig = DEFAULT_APP_CONFIG;
       try {
@@ -523,6 +544,7 @@ export async function ensureUserProfile(user: User, customPhone?: string, custom
         updatedAt: serverTimestamp(),
       };
       await setDoc(ref, initialProfile);
+      verifiedUserDocs.add(user.uid);
       return {
         ownerId: user.uid,
         shopName: initialProfile.shopName,
@@ -542,11 +564,22 @@ export async function ensureUserProfile(user: User, customPhone?: string, custom
   }
 }
 
+async function ensureParentUserDoc(uid: string): Promise<void> {
+  if (verifiedUserDocs.has(uid)) return;
+  if (auth.currentUser && auth.currentUser.uid === uid) {
+    await ensureUserProfile(auth.currentUser);
+  }
+}
+
 export async function updateUserProfile(uid: string, updates: Partial<UserProfileDoc>): Promise<void> {
   const path = `users/${uid}`;
   const ref = doc(db, 'users', uid);
   try {
-    const snap = await getDoc(ref);
+    let snap = await getDoc(ref);
+    if (!snap.exists() && auth.currentUser && auth.currentUser.uid === uid) {
+      await ensureUserProfile(auth.currentUser, updates.phone, updates.shopName);
+      snap = await getDoc(ref);
+    }
     if (!snap.exists()) return;
     const current = snap.data();
     let mergedConfig = DEFAULT_APP_CONFIG;
@@ -568,7 +601,7 @@ export async function updateUserProfile(uid: string, updates: Partial<UserProfil
       address: cleanStr(updates.address ?? current.address, 300, ''),
       gstNumber: cleanStr(updates.gstNumber ?? current.gstNumber, 30, ''),
       fssaiNumber: cleanStr(updates.fssaiNumber ?? current.fssaiNumber, 30, ''),
-      logoUrl: cleanStr(updates.logoUrl ?? current.logoUrl, 500, ''),
+      logoUrl: cleanUrl(updates.logoUrl ?? current.logoUrl, ''),
       language: updates.language ?? current.language ?? 'en',
       configPayload: JSON.stringify(mergedConfig).slice(0, 15000),
       updatedAt: serverTimestamp(),
@@ -581,7 +614,8 @@ export async function updateUserProfile(uid: string, updates: Partial<UserProfil
 
 // Save or Update Product
 export async function saveProductToDb(uid: string, product: Partial<ProductDoc> & { name: string }): Promise<string> {
-  const id = cleanId(product.id);
+  const existingRecord = isPersistedDocId(product.id);
+  const id = cleanId(existingRecord ? product.id : undefined);
   const path = `users/${uid}/products/${id}`;
   const ref = doc(db, 'users', uid, 'products', id);
   const detailsPayload = JSON.stringify({
@@ -593,7 +627,7 @@ export async function saveProductToDb(uid: string, product: Partial<ProductDoc> 
     name: cleanStr(product.name, 200, 'Unnamed Product'),
     variantName: cleanStr(product.variantName, 120, ''),
     barcode: cleanStr(product.barcode, 64, ''),
-    unit: cleanStr(product.unit || 'Piece', 32, 'Piece'),
+    unit: cleanStr(product.unit, 32, 'Piece'),
     mrp: Math.max(0, Number(product.mrp) || 0),
     retailPrice: Math.max(0, Number(product.retailPrice) || 0),
     wholesalePrice: Math.max(0, Number(product.wholesalePrice) || 0),
@@ -607,15 +641,15 @@ export async function saveProductToDb(uid: string, product: Partial<ProductDoc> 
     category: cleanStr(product.category, 100, 'General'),
     supplierName: cleanStr(product.supplierName, 120, ''),
     expiryDate: cleanStr(product.expiryDate, 32, ''),
-    imageUrl: cleanStr(product.imageUrl, 500, ''),
+    imageUrl: cleanUrl(product.imageUrl, ''),
     archived: Boolean(product.archived),
     detailsPayload,
     updatedAt: serverTimestamp(),
   };
 
   try {
-    const existingSnap = await getDoc(ref);
-    if (existingSnap.exists()) {
+    await ensureParentUserDoc(uid);
+    if (existingRecord) {
       await updateDoc(ref, baseFields);
     } else {
       await setDoc(ref, {
@@ -626,7 +660,7 @@ export async function saveProductToDb(uid: string, product: Partial<ProductDoc> 
     }
     return id;
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    handleFirestoreError(error, existingRecord ? OperationType.UPDATE : OperationType.CREATE, path);
   }
 }
 
@@ -649,6 +683,7 @@ export async function createOrderInDb(
   const path = `users/${uid}/orders/${id}`;
   const ref = doc(db, 'users', uid, 'orders', id);
   try {
+    await ensureParentUserDoc(uid);
     await setDoc(ref, {
       ownerId: uid,
       invoiceNumber: cleanStr(order.invoiceNumber, 64, '1'),
@@ -672,14 +707,15 @@ export async function createOrderInDb(
 
     // Deduct sold quantities from Firebase stock
     for (const item of order.items) {
-      if (item.productId) {
-        const matched = currentProducts.find((p) => p.id === item.productId);
-        if (matched) {
-          await saveProductToDb(uid, {
-            ...matched,
-            quantity: Number(matched.quantity || 0) - Number(item.qty || 0),
-          });
-        }
+      const matched =
+        currentProducts.find((p) => item.productId && p.id === item.productId) ||
+        currentProducts.find((p) => item.barcode && p.barcode === item.barcode) ||
+        currentProducts.find((p) => item.name && p.name.toLowerCase() === item.name.toLowerCase());
+      if (matched) {
+        await saveProductToDb(uid, {
+          ...matched,
+          quantity: Number(matched.quantity || 0) - Number(item.qty || 0),
+        });
       }
     }
     return id;
@@ -717,6 +753,7 @@ export async function createPurchaseInDb(
   const path = `users/${uid}/purchases/${id}`;
   const ref = doc(db, 'users', uid, 'purchases', id);
   try {
+    await ensureParentUserDoc(uid);
     await setDoc(ref, {
       ownerId: uid,
       supplierName: cleanStr(purchase.supplierName, 120, ''),
@@ -725,23 +762,39 @@ export async function createPurchaseInDb(
       dateStr: cleanStr(purchase.dateStr, 32, new Date().toISOString().slice(0, 10)),
       totalAmount: Number(purchase.totalAmount) || 0,
       discountAmount: Number(purchase.discountAmount) || 0,
-      billImageUrl: cleanStr(purchase.billImageUrl, 500, ''),
+      billImageUrl: cleanUrl(purchase.billImageUrl, ''),
       itemsPayload: JSON.stringify(purchase.items).slice(0, 50000),
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
 
-    // Increment purchased quantities in Firebase stock
+    // Increment purchased quantities in Firebase stock (or create if scanned/voice item is new)
     for (const item of purchase.items) {
-      if (item.productId) {
-        const matched = currentProducts.find((p) => p.id === item.productId);
-        if (matched) {
-          await saveProductToDb(uid, {
-            ...matched,
-            quantity: Number(matched.quantity || 0) + Number(item.qty || 0),
-            purchasePrice: item.purchasePrice || matched.purchasePrice,
-          });
-        }
+      const matched =
+        currentProducts.find((p) => item.productId && p.id === item.productId) ||
+        currentProducts.find((p) => item.barcode && p.barcode === item.barcode) ||
+        currentProducts.find((p) => item.name && p.name.toLowerCase() === item.name.toLowerCase());
+      if (matched) {
+        await saveProductToDb(uid, {
+          ...matched,
+          quantity: Number(matched.quantity || 0) + Number(item.qty || 0),
+          purchasePrice: item.purchasePrice || matched.purchasePrice,
+        });
+      } else if (item.name && (!item.productId || /^(voice|aiscan)_/.test(item.productId))) {
+        await saveProductToDb(uid, {
+          name: item.name,
+          variantName: item.variantName || '',
+          barcode: item.barcode || '',
+          unit: item.unit || 'Piece',
+          mrp: item.mrp || item.retailPrice || item.purchasePrice || 0,
+          retailPrice: item.retailPrice || item.mrp || item.purchasePrice || 0,
+          purchasePrice: item.purchasePrice || item.retailPrice || 0,
+          quantity: Number(item.qty) || 1,
+          gst: item.gst || 0,
+          cess: item.cess || 0,
+          hsn: item.hsn || '',
+          archived: false,
+        });
       }
     }
     return id;
@@ -760,6 +813,7 @@ export async function createSaleReturnInDb(
   const path = `users/${uid}/returns/${id}`;
   const ref = doc(db, 'users', uid, 'returns', id);
   try {
+    await ensureParentUserDoc(uid);
     await setDoc(ref, {
       ownerId: uid,
       returnNumber: cleanStr(ret.returnNumber, 64, 'RET-1'),
@@ -774,14 +828,15 @@ export async function createSaleReturnInDb(
     });
 
     for (const item of ret.items) {
-      if (item.productId) {
-        const matched = currentProducts.find((p) => p.id === item.productId);
-        if (matched) {
-          await saveProductToDb(uid, {
-            ...matched,
-            quantity: Number(matched.quantity || 0) + Number(item.qty || 0),
-          });
-        }
+      const matched =
+        currentProducts.find((p) => item.productId && p.id === item.productId) ||
+        currentProducts.find((p) => item.barcode && p.barcode === item.barcode) ||
+        currentProducts.find((p) => item.name && p.name.toLowerCase() === item.name.toLowerCase());
+      if (matched) {
+        await saveProductToDb(uid, {
+          ...matched,
+          quantity: Number(matched.quantity || 0) + Number(item.qty || 0),
+        });
       }
     }
     return id;
@@ -795,7 +850,8 @@ export async function saveSupplierToDb(
   uid: string,
   supplier: Partial<SupplierDoc> & { name: string; phone: string }
 ): Promise<string> {
-  const id = cleanId(supplier.id);
+  const existingRecord = isPersistedDocId(supplier.id);
+  const id = cleanId(existingRecord ? supplier.id : undefined);
   const path = `users/${uid}/suppliers/${id}`;
   const ref = doc(db, 'users', uid, 'suppliers', id);
   const fields = {
@@ -804,14 +860,14 @@ export async function saveSupplierToDb(
     address: cleanStr(supplier.address, 300, ''),
     notes: cleanStr(supplier.notes, 500, ''),
     gstNumber: cleanStr(supplier.gstNumber, 30, ''),
-    avatarUrl: cleanStr(supplier.avatarUrl, 500, ''),
+    avatarUrl: cleanUrl(supplier.avatarUrl, ''),
     balance: Number(supplier.balance) || 0,
     ledgerPayload: JSON.stringify(supplier.ledger || []).slice(0, 50000),
     updatedAt: serverTimestamp(),
   };
   try {
-    const snap = await getDoc(ref);
-    if (snap.exists()) {
+    await ensureParentUserDoc(uid);
+    if (existingRecord) {
       await updateDoc(ref, fields);
     } else {
       await setDoc(ref, {
@@ -822,7 +878,7 @@ export async function saveSupplierToDb(
     }
     return id;
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    handleFirestoreError(error, existingRecord ? OperationType.UPDATE : OperationType.CREATE, path);
   }
 }
 
@@ -831,7 +887,8 @@ export async function saveCustomerToDb(
   uid: string,
   customer: Partial<CustomerDoc> & { name: string; phone: string }
 ): Promise<string> {
-  const id = cleanId(customer.id);
+  const existingRecord = isPersistedDocId(customer.id);
+  const id = cleanId(existingRecord ? customer.id : undefined);
   const path = `users/${uid}/customers/${id}`;
   const ref = doc(db, 'users', uid, 'customers', id);
   const fields = {
@@ -840,14 +897,14 @@ export async function saveCustomerToDb(
     address: cleanStr(customer.address, 300, ''),
     notes: cleanStr(customer.notes, 500, ''),
     gstNumber: cleanStr(customer.gstNumber, 30, ''),
-    avatarUrl: cleanStr(customer.avatarUrl, 500, ''),
+    avatarUrl: cleanUrl(customer.avatarUrl, ''),
     balance: Number(customer.balance) || 0,
     ledgerPayload: JSON.stringify(customer.ledger || []).slice(0, 50000),
     updatedAt: serverTimestamp(),
   };
   try {
-    const snap = await getDoc(ref);
-    if (snap.exists()) {
+    await ensureParentUserDoc(uid);
+    if (existingRecord) {
       await updateDoc(ref, fields);
     } else {
       await setDoc(ref, {
@@ -858,7 +915,7 @@ export async function saveCustomerToDb(
     }
     return id;
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    handleFirestoreError(error, existingRecord ? OperationType.UPDATE : OperationType.CREATE, path);
   }
 }
 
@@ -871,6 +928,7 @@ export async function saveExpenseToDb(
   const path = `users/${uid}/expenses/${id}`;
   const ref = doc(db, 'users', uid, 'expenses', id);
   try {
+    await ensureParentUserDoc(uid);
     await setDoc(ref, {
       ownerId: uid,
       title: cleanStr(expense.title, 150, 'Expense'),
@@ -894,21 +952,22 @@ export async function saveStaffToDb(
   uid: string,
   staff: Partial<StaffDoc> & { name: string; phone: string }
 ): Promise<string> {
-  const id = cleanId(staff.id);
+  const existingRecord = isPersistedDocId(staff.id);
+  const id = cleanId(existingRecord ? staff.id : undefined);
   const path = `users/${uid}/staff/${id}`;
   const ref = doc(db, 'users', uid, 'staff', id);
   const fields = {
     name: cleanStr(staff.name, 120, 'Staff'),
     phone: cleanStr(staff.phone, 30, '+91'),
-    role: cleanStr(staff.role || 'Salesman', 64, 'Salesman'),
+    role: cleanStr(staff.role, 64, 'Salesman'),
     salary: Math.max(0, Number(staff.salary) || 0),
     commissionPct: Math.min(100, Math.max(0, Number(staff.commissionPct) || 0)),
     attendancePayload: JSON.stringify(staff.attendance || []).slice(0, 20000),
     updatedAt: serverTimestamp(),
   };
   try {
-    const snap = await getDoc(ref);
-    if (snap.exists()) {
+    await ensureParentUserDoc(uid);
+    if (existingRecord) {
       await updateDoc(ref, fields);
     } else {
       await setDoc(ref, {
@@ -919,7 +978,7 @@ export async function saveStaffToDb(
     }
     return id;
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    handleFirestoreError(error, existingRecord ? OperationType.UPDATE : OperationType.CREATE, path);
   }
 }
 

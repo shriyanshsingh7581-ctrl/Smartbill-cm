@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import {
   QrCode,
@@ -76,9 +76,43 @@ type ActiveModule =
   | 'printer'
   | 'reports';
 
+class AppErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean; message: string }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, message: '' };
+  }
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, message: error?.message || 'Unexpected application error' };
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-[#F4F6F9] flex flex-col items-center justify-center p-6 text-center max-w-md mx-auto">
+          <div className="bg-white rounded-3xl p-6 shadow-md border border-slate-200 space-y-3 w-full">
+            <h2 className="text-base font-extrabold text-[#0A2540]">Something went wrong</h2>
+            <p className="text-xs text-slate-500">{this.state.message}</p>
+            <button
+              type="button"
+              onClick={() => this.setState({ hasError: false, message: '' })}
+              className="w-full py-3 rounded-xl bg-[#0A2540] text-white text-xs font-bold"
+            >
+              Recover &amp; Continue
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const pendingAuthMetaRef = useRef<{ phone?: string; shopName?: string } | null>(null);
 
   // Per-User Multi-Tenant Live Firebase State
   const [profile, setProfile] = useState<UserProfileDoc>({
@@ -145,7 +179,16 @@ export default function App() {
     const unsubAuth = onAuthStateChanged(auth, async (user) => {
       if (user) {
         try {
-          const initialProf = await ensureUserProfile(user);
+          let initialProf = await ensureUserProfile(user);
+          const pending = pendingAuthMetaRef.current;
+          if (pending && (pending.shopName?.trim() || pending.phone?.trim())) {
+            const updates: Partial<UserProfileDoc> = {};
+            if (pending.shopName?.trim()) updates.shopName = pending.shopName.trim();
+            if (pending.phone?.trim()) updates.phone = pending.phone.trim();
+            await updateUserProfile(user.uid, updates);
+            initialProf = { ...initialProf, ...updates };
+            pendingAuthMetaRef.current = null;
+          }
           setProfile(initialProf);
         } catch (err) {
           console.error('Profile initialization error:', err);
@@ -211,6 +254,14 @@ export default function App() {
         expenses
       );
       setAiMessages((prev) => [...prev, { role: 'assistant', text: reply }]);
+    } catch {
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          text: 'Could not reach AI assistant right now. Your store data is safe — please try again shortly.',
+        },
+      ]);
     } finally {
       setAiLoading(false);
     }
@@ -219,12 +270,16 @@ export default function App() {
   const handleCompleteTour = async () => {
     setTourStep(null);
     if (currentUser) {
-      await updateUserProfile(currentUser.uid, {
-        config: {
-          ...profile.config,
-          tourCompleted: true,
-        },
-      });
+      try {
+        await updateUserProfile(currentUser.uid, {
+          config: {
+            ...profile.config,
+            tourCompleted: true,
+          },
+        });
+      } catch (err) {
+        console.error('Could not save tour completion:', err);
+      }
     }
   };
 
@@ -243,7 +298,13 @@ export default function App() {
   }
 
   if (!currentUser) {
-    return <AuthScreen />;
+    return (
+      <AuthScreen
+        onAuthSuccess={(phone, shopName) => {
+          pendingAuthMetaRef.current = { phone, shopName };
+        }}
+      />
+    );
   }
 
   const uid = currentUser.uid;
@@ -732,8 +793,9 @@ export default function App() {
     activeModule === 'more';
 
   return (
-    <div className="max-w-md mx-auto min-h-screen bg-[#F4F6F9] shadow-2xl relative overflow-x-hidden">
-      {renderActiveModule()}
+    <AppErrorBoundary>
+      <div className="max-w-md mx-auto min-h-screen bg-[#F4F6F9] shadow-2xl relative overflow-x-hidden">
+        {renderActiveModule()}
 
       {/* 4-Tab Bottom Navigation Bar (Home, Calculator, Online shop [NEW], More) */}
       {showBottomNav && (
@@ -1041,6 +1103,7 @@ export default function App() {
           </div>
         </div>
       )}
-    </div>
+      </div>
+    </AppErrorBoundary>
   );
 }

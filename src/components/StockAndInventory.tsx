@@ -26,6 +26,9 @@ import {
   Copy,
   Trash2,
   Lock,
+  Edit3,
+  X,
+  AlertCircle,
 } from 'lucide-react';
 import {
   saveProductToDb,
@@ -180,6 +183,89 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
   const [expandedVariantIdx, setExpandedVariantIdx] = useState<number>(0);
   const [additionalDetailsOpenIdx, setAdditionalDetailsOpenIdx] = useState<number | null>(null);
   const [savingManual, setSavingManual] = useState(false);
+  const [editingProductId, setEditingProductId] = useState<string | null>(null);
+  const [savingQuickAdd, setSavingQuickAdd] = useState(false);
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [tutorialModalOpen, setTutorialModalOpen] = useState(false);
+
+  const showToast = (type: 'success' | 'error', msg: string) => {
+    setToast({ type, msg });
+    setTimeout(() => setToast(null), 3200);
+  };
+
+  const resetManualForm = (prefillBarcode = '') => {
+    setEditingProductId(null);
+    setManualName('');
+    setManualQty('0');
+    setManualUnit('Piece');
+    setManualImageUrl('');
+    setBomItems([]);
+    setExpandedVariantIdx(0);
+    setAdditionalDetailsOpenIdx(null);
+    setVariants([
+      {
+        variantName: '',
+        quantity: 0,
+        barcode: prefillBarcode,
+        mrp: 0,
+        retailPrice: 0,
+        wholesalePrice: 0,
+        purchasePrice: 0,
+        setAsDefault: true,
+        includingGst: true,
+        discountValue: 0,
+        discountType: '%',
+        batch: '',
+        packOf: 1,
+        hsn: '',
+        gst: 0,
+        cess: 0,
+        expiryDate: '',
+        lowStockAlert: 5,
+        rack: '',
+      },
+    ]);
+  };
+
+  const openEditProduct = (p: ProductDoc) => {
+    setEditingProductId(p.id);
+    setManualName(p.name || '');
+    setManualQty(String(p.quantity ?? 0));
+    setManualUnit(p.unit || 'Piece');
+    setManualImageUrl(p.imageUrl || '');
+    setBomItems(p.bomItems || []);
+    setExpandedVariantIdx(0);
+    setAdditionalDetailsOpenIdx(null);
+    if (p.variants && p.variants.length > 0) {
+      setVariants(p.variants);
+    } else {
+      setVariants([
+        {
+          variantName: p.variantName || '',
+          quantity: p.quantity ?? 0,
+          barcode: p.barcode || '',
+          mrp: p.mrp ?? 0,
+          retailPrice: p.retailPrice ?? 0,
+          wholesalePrice: p.wholesalePrice ?? 0,
+          purchasePrice: p.purchasePrice ?? 0,
+          setAsDefault: true,
+          includingGst: true,
+          discountValue: 0,
+          discountType: '%',
+          batch: '',
+          packOf: 1,
+          hsn: p.hsn || '',
+          gst: p.gst ?? 0,
+          cess: p.cess ?? 0,
+          expiryDate: p.expiryDate || '',
+          lowStockAlert: p.lowStockAlert ?? 5,
+          rack: p.rack || '',
+        },
+      ]);
+    }
+    setSubScreen('manual_add');
+  };
 
   // AI Requests counter
   const todayIso = new Date().toISOString().slice(0, 10);
@@ -209,6 +295,10 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
           aiRequestDate: todayIso,
         },
       });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to get AI insights';
+      setAiResponse(`Error: ${message}`);
+      showToast('error', 'AI assistant error. Please try again.');
     } finally {
       setAiLoading(false);
     }
@@ -294,64 +384,86 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
 
   // Save Quick Add Product
   const handleSaveQuickAdd = async () => {
-    if (!qaName.trim()) return;
+    if (!qaName.trim()) {
+      showToast('error', 'Please enter Product Name / प्रोडक्ट का नाम भरें');
+      return;
+    }
     const mrpVal = Number(qaMrp) || 0;
     const retailVal = Number(qaRetail) || mrpVal;
     const qtyVal = Number(qaQty) || 1;
     const purchaseVal = Number(qaPurchasePrice) || retailVal;
 
-    let savedId = `temp_${Date.now()}`;
-    if (qaAddToInventory) {
-      savedId = await saveProductToDb(uid, {
-        name: qaName.trim(),
-        variantName: qaVariant.trim(),
-        barcode: qaBarcode.trim(),
-        unit: qaUnit,
-        mrp: mrpVal,
-        retailPrice: retailVal,
-        wholesalePrice: Number(qaWholesale) || 0,
-        purchasePrice: purchaseVal,
-        quantity: subScreen === 'purchase_entry' ? 0 : qtyVal,
-        gst: Number(qaGst) || 0,
-        cess: Number(qaCess) || 0,
-        hsn: qaHsn.trim(),
-        rack: qaRack.trim(),
-        archived: false,
-      });
-    }
-
-    if (subScreen === 'purchase_entry') {
-      setPurItems((prev) => [
-        ...prev,
-        {
-          productId: savedId,
+    setSavingQuickAdd(true);
+    try {
+      let savedId = `temp_${Date.now()}`;
+      const shouldSaveToInv = qaAddToInventory || subScreen !== 'purchase_entry';
+      if (shouldSaveToInv) {
+        savedId = await saveProductToDb(uid, {
           name: qaName.trim(),
           variantName: qaVariant.trim(),
           barcode: qaBarcode.trim(),
           unit: qaUnit,
-          qty: qtyVal,
           mrp: mrpVal,
           retailPrice: retailVal,
+          wholesalePrice: Number(qaWholesale) || 0,
           purchasePrice: purchaseVal,
+          quantity: subScreen === 'purchase_entry' ? 0 : qtyVal,
           gst: Number(qaGst) || 0,
           cess: Number(qaCess) || 0,
           hsn: qaHsn.trim(),
-          discount: 0,
-        },
-      ]);
-    }
+          rack: qaRack.trim(),
+          archived: false,
+        });
+      }
 
-    setQaName('');
-    setQaBarcode('');
-    setQaVariant('');
-    setQaMrp('0.00');
-    setQaRetail('0.00');
-    setQaQty('1');
-    setQuickAddOpen(false);
+      if (subScreen === 'purchase_entry') {
+        setPurItems((prev) => [
+          ...prev,
+          {
+            productId: savedId,
+            name: qaName.trim(),
+            variantName: qaVariant.trim(),
+            barcode: qaBarcode.trim(),
+            unit: qaUnit,
+            qty: qtyVal,
+            mrp: mrpVal,
+            retailPrice: retailVal,
+            purchasePrice: purchaseVal,
+            gst: Number(qaGst) || 0,
+            cess: Number(qaCess) || 0,
+            hsn: qaHsn.trim(),
+            discount: 0,
+          },
+        ]);
+      }
+
+      setQaName('');
+      setQaBarcode('');
+      setQaVariant('');
+      setQaMrp('0.00');
+      setQaRetail('0.00');
+      setQaQty('1');
+      setQaWholesale('');
+      setQaCess('');
+      setQaGst('');
+      setQaHsn('');
+      setQaPurchasePrice('');
+      setQaRack('');
+      setQuickAddOpen(false);
+      showToast('success', 'Product saved to stock!');
+    } catch (err) {
+      console.error('Quick Add error:', err);
+      showToast('error', 'Failed to save product. Check connection & try again.');
+    } finally {
+      setSavingQuickAdd(false);
+    }
   };
 
   const handleCompletePurchase = async () => {
-    if (purItems.length === 0) return;
+    if (purItems.length === 0) {
+      showToast('error', 'Add at least 1 product to complete purchase.');
+      return;
+    }
     setSavingPurchase(true);
     try {
       const selectedSup = suppliers.find((s) => s.id === purSupplierId);
@@ -373,7 +485,12 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
       );
       setPurItems([]);
       setPurDiscount(0);
+      setPurBillUrl('');
       setSubScreen('my_stock');
+      showToast('success', 'Purchase saved & stock updated!');
+    } catch (err) {
+      console.error('Purchase save error:', err);
+      showToast('error', 'Failed to save purchase. Please try again.');
     } finally {
       setSavingPurchase(false);
     }
@@ -381,16 +498,25 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
 
   // Save Manual Product
   const handleSaveManualProduct = async () => {
-    if (!manualName.trim()) return;
+    if (!manualName.trim()) {
+      showToast('error', 'Please enter Product Name / प्रोडक्ट का नाम भरें');
+      return;
+    }
     setSavingManual(true);
     try {
       const primary = variants[0];
+      const variantSum = variants.reduce((acc, v) => acc + (Number(v.quantity) || 0), 0);
       const totalQty =
-        Number(manualQty) > 0
-          ? Number(manualQty)
-          : variants.reduce((acc, v) => acc + (Number(v.quantity) || 0), 0);
+        variants.length > 1
+          ? variantSum
+          : Number(manualQty) || Number(primary.quantity) || 0;
+
+      const syncedVariants = variants.map((v, i) =>
+        i === 0 && variants.length === 1 ? { ...v, quantity: totalQty } : v
+      );
 
       await saveProductToDb(uid, {
+        ...(editingProductId ? { id: editingProductId } : {}),
         name: manualName.trim(),
         variantName: primary.variantName,
         barcode: primary.barcode,
@@ -408,24 +534,28 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
         expiryDate: primary.expiryDate || '',
         imageUrl: manualImageUrl,
         archived: false,
-        variants,
-        bomItems,
+        variants: syncedVariants,
+        bomItems: bomItems.filter((b) => b.rawMaterialName.trim()),
       });
 
-      setManualName('');
-      setManualQty('0');
-      setManualImageUrl('');
+      resetManualForm();
       setSubScreen('my_stock');
+      showToast('success', editingProductId ? 'Product updated!' : 'Product saved to stock!');
+    } catch (err) {
+      console.error('Manual product save error:', err);
+      showToast('error', 'Could not save product. Please check fields & try again.');
     } finally {
       setSavingManual(false);
     }
   };
 
   // ============================================================================
-  // SUBSCREEN 1: ADD INVENTORY HUB (Matches 08:31 - "Add Inventory/ स्टॉक जोड़ें")
+  // RENDER ACTIVE SUBSCREEN INTO `screenContent` SO SHARED MODALS ALWAYS WORK
   // ============================================================================
+  let screenContent: React.ReactNode = null;
+
   if (subScreen === 'add_hub') {
-    return (
+    screenContent = (
       <div className="min-h-screen bg-[#F8F9FA] flex flex-col">
         {/* Top Navy Header */}
         <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3 sticky top-0 z-30">
@@ -495,7 +625,10 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
 
             <button
               type="button"
-              onClick={() => setSubScreen('manual_add')}
+              onClick={() => {
+                resetManualForm();
+                setSubScreen('manual_add');
+              }}
               className="bg-white border border-slate-200 rounded-2xl p-4 flex flex-col items-center justify-center gap-2.5 shadow-xs active:scale-95 transition-transform aspect-square"
             >
               <Plus className="w-6 h-6 text-[#0A2540]" />
@@ -507,8 +640,30 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
             </button>
           </div>
 
-          {/* 2 Full-width Rows: Search by name & Scan barcode */}
+          {/* 3 Full-width Rows: Quick Add, Search by name & Scan barcode */}
           <div className="space-y-3">
+            <button
+              type="button"
+              onClick={() => {
+                setQaAddToInventory(true);
+                setQuickAddOpen(true);
+              }}
+              className="w-full bg-white border border-slate-200 rounded-2xl p-4 flex items-center justify-between shadow-xs active:scale-[0.99]"
+            >
+              <div className="flex items-center gap-3.5 text-left">
+                <div className="w-11 h-11 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center">
+                  <Sparkles className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-[#0A2540]">Quick Add Product</h3>
+                  <p className="text-xs text-slate-400">
+                    Fast 1-step form to add product & stock
+                  </p>
+                </div>
+              </div>
+              <ChevronRight className="w-4 h-4 text-slate-400" />
+            </button>
+
             <button
               type="button"
               onClick={() => setSubScreen('my_stock')}
@@ -537,9 +692,7 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
                     setSearchQuery(code);
                     setSubScreen('my_stock');
                   } else {
-                    setVariants((prev) =>
-                      prev.map((v, idx) => (idx === 0 ? { ...v, barcode: code } : v))
-                    );
+                    resetManualForm(code);
                     setSubScreen('manual_add');
                   }
                 })
@@ -563,12 +716,7 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
         </div>
       </div>
     );
-  }
-
-  // ============================================================================
-  // SUBSCREEN 2: PURCHASE ENTRY SCREEN (Matches 08:35 - 08:49)
-  // ============================================================================
-  if (subScreen === 'purchase_entry') {
+  } else if (subScreen === 'purchase_entry') {
     const rawTotal = purItems.reduce(
       (acc, it) => acc + it.qty * (it.purchasePrice || it.retailPrice),
       0
@@ -576,7 +724,7 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
     const netPurchaseTotal = Math.max(0, rawTotal - purDiscount);
     const totalQty = purItems.reduce((acc, it) => acc + it.qty, 0);
 
-    return (
+    screenContent = (
       <div className="min-h-screen bg-[#FAF9F5] flex flex-col justify-between">
         {/* Top Bar with Supplier, Payment Mode, Date, Attach Bills, Discount & Total */}
         <div className="bg-white border-b border-slate-200 p-3 sticky top-0 z-20">
@@ -924,290 +1072,36 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
           </div>
         )}
 
-        {/* Quick Add Bottom Sheet (Matches 08:42 - 08:48) */}
-        {quickAddOpen && (
-          <div className="fixed inset-0 z-50 bg-black/50 flex items-end justify-center">
-            <div className="bg-white w-full max-w-md rounded-t-3xl p-5 max-h-[90vh] overflow-y-auto space-y-3.5">
-              <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-1" />
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-9 h-9 rounded-xl bg-slate-100 flex items-center justify-center font-bold text-slate-800">
-                    +
-                  </div>
-                  <h3 className="text-base font-extrabold text-[#0A2540]">Quick add</h3>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setQaVariant(qaVariant || 'Standard')}
-                  className="bg-[#0e5a7a] text-white text-xs font-bold px-3.5 py-2 rounded-xl"
-                >
-                  Variant of?
-                </button>
-              </div>
-
-              <label className="flex items-center gap-2.5 bg-slate-50 border border-slate-200 rounded-xl p-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={qaAddToInventory}
-                  onChange={(e) => setQaAddToInventory(e.target.checked)}
-                  className="w-4 h-4 accent-[#0A2540]"
-                />
-                <span className="text-xs font-bold text-[#0A2540]">Add to Inventory</span>
-              </label>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-600 mb-1">Barcode</label>
-                <div className="flex items-center border border-slate-300 rounded-xl px-3 py-2 gap-2">
-                  <input
-                    type="text"
-                    value={qaBarcode}
-                    onChange={(e) => setQaBarcode(e.target.value)}
-                    placeholder="Enter or scan barcode"
-                    className="flex-1 text-sm outline-none"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => onOpenScanner((c) => setQaBarcode(c))}
-                    className="text-slate-600 p-1"
-                  >
-                    <ScanLine className="w-4 h-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setQaBarcode(String(Math.floor(100000000000 + Math.random() * 900000000000)))
-                    }
-                    className="text-slate-600 p-1"
-                    title="Auto-generate barcode"
-                  >
-                    <Sparkles className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-600 mb-1">
-                  Product Name *
-                </label>
-                <input
-                  type="text"
-                  value={qaName}
-                  onChange={(e) => setQaName(e.target.value)}
-                  placeholder="Enter Product Name"
-                  className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-600 mb-1">
-                  Variant Name <span className="text-slate-400 font-normal">(optional)</span>
-                </label>
-                <input
-                  type="text"
-                  value={qaVariant}
-                  onChange={(e) => setQaVariant(e.target.value)}
-                  placeholder="e.g. 500ml, Red, Large"
-                  className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1">MRP *</label>
-                  <input
-                    type="number"
-                    value={qaMrp}
-                    onChange={(e) => {
-                      setQaMrp(e.target.value);
-                      if (qaRetail === '0.00' || !qaRetail) setQaRetail(e.target.value);
-                    }}
-                    className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1">
-                    Retail Price *
-                  </label>
-                  <input
-                    type="number"
-                    value={qaRetail}
-                    onChange={(e) => setQaRetail(e.target.value)}
-                    className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3 items-end">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1">
-                    Quantity *
-                  </label>
-                  <input
-                    type="number"
-                    value={qaQty}
-                    onChange={(e) => setQaQty(e.target.value)}
-                    className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none"
-                  />
-                </div>
-                <div>
-                  <select
-                    value={qaUnit}
-                    onChange={(e) => setQaUnit(e.target.value)}
-                    className="w-full bg-slate-100 border border-slate-200 rounded-xl px-3.5 py-2.5 text-sm font-semibold text-slate-800 outline-none"
-                  >
-                    {UNITS_LIST.map((u) => (
-                      <option key={u} value={u}>
-                        {u}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              {/* Additional Details Accordion */}
-              <div className="border border-slate-200 rounded-xl overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setQaAdditionalOpen(!qaAdditionalOpen)}
-                  className="w-full px-3.5 py-3 flex items-center justify-between text-xs font-bold text-[#0A2540] bg-slate-50"
-                >
-                  <span>Additional Details (Optional)</span>
-                  {qaAdditionalOpen ? (
-                    <ChevronUp className="w-4 h-4" />
-                  ) : (
-                    <ChevronDown className="w-4 h-4" />
-                  )}
-                </button>
-                {qaAdditionalOpen && (
-                  <div className="p-3.5 space-y-3 bg-white">
-                    <div className="grid grid-cols-2 gap-2.5">
-                      <div>
-                        <label className="block text-[11px] text-slate-500 mb-1">
-                          Wholesale price
-                        </label>
-                        <input
-                          type="number"
-                          placeholder="₹"
-                          value={qaWholesale}
-                          onChange={(e) => setQaWholesale(e.target.value)}
-                          className="w-full border border-slate-300 rounded-xl px-3 py-2 text-xs"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[11px] text-slate-500 mb-1">Cess</label>
-                        <input
-                          type="number"
-                          value={qaCess}
-                          onChange={(e) => setQaCess(e.target.value)}
-                          className="w-full border border-slate-300 rounded-xl px-3 py-2 text-xs"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[11px] text-slate-500 mb-1">GST</label>
-                        <input
-                          type="number"
-                          value={qaGst}
-                          onChange={(e) => setQaGst(e.target.value)}
-                          className="w-full border border-slate-300 rounded-xl px-3 py-2 text-xs"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[11px] text-slate-500 mb-1">Hsn</label>
-                        <input
-                          type="text"
-                          value={qaHsn}
-                          onChange={(e) => setQaHsn(e.target.value)}
-                          className="w-full border border-slate-300 rounded-xl px-3 py-2 text-xs"
-                        />
-                      </div>
-                    </div>
-                    <div>
-                      <label className="block text-[11px] text-slate-500 mb-1">
-                        Purchase price
-                      </label>
-                      <input
-                        type="number"
-                        value={qaPurchasePrice}
-                        onChange={(e) => setQaPurchasePrice(e.target.value)}
-                        className="w-full border border-slate-300 rounded-xl px-3 py-2 text-xs"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] text-slate-500 mb-1">
-                        Rack (optional)
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="e.g. A1, D6"
-                        value={qaRack}
-                        onChange={(e) => setQaRack(e.target.value)}
-                        className="w-full border border-slate-300 rounded-xl px-3 py-2 text-xs"
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className="grid grid-cols-2 gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setQuickAddOpen(false)}
-                  className="py-3 rounded-xl border border-slate-300 font-bold text-sm text-slate-700"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSaveQuickAdd}
-                  className="py-3 rounded-xl bg-[#0A2540] text-white font-bold text-sm"
-                >
-                  Add Product
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        <SmartVoiceModal
-          isOpen={voiceModalOpen}
-          onClose={() => setVoiceModalOpen(false)}
-          context={voiceContext}
-          onVoiceApplied={handleVoiceResultApplied}
-          title="🎙️ AI Voice Purchase Entry"
-        />
-
-        <ApkPhotoSheet
-          isOpen={photoSheetTarget === 'purchase_bill'}
-          onClose={() => setPhotoSheetTarget(null)}
-          title="Attach Supplier Bill Photo"
-          onUploaded={(url) => setPurBillUrl(url)}
-        />
       </div>
     );
-  }
-
-  // ============================================================================
-  // SUBSCREEN 3: EXCEL IMPORT SCREEN (Matches 08:58 - 09:00)
-  // ============================================================================
-  if (subScreen === 'excel_import') {
+  } else if (subScreen === 'excel_import') {
     const handleBulkImport = async () => {
-      if (parsedExcelItems.length === 0) return;
+      if (parsedExcelItems.length === 0) {
+        showToast('error', 'Select an Excel/CSV file first.');
+        return;
+      }
       setImportingExcel(true);
       try {
+        let importedCount = 0;
         for (const item of parsedExcelItems) {
-          if (item.name) {
+          if (item.name && item.name.trim()) {
             await saveProductToDb(uid, item as Partial<ProductDoc> & { name: string });
+            importedCount++;
           }
         }
-        setExcelImportSuccess(`Successfully imported ${parsedExcelItems.length} products!`);
+        setExcelImportSuccess(`Successfully imported ${importedCount} products!`);
         setParsedExcelItems([]);
         setExcelFileName('');
+        showToast('success', `Imported ${importedCount} products!`);
+      } catch (err) {
+        console.error('Excel import error:', err);
+        showToast('error', 'Failed to import some products. Please try again.');
       } finally {
         setImportingExcel(false);
       }
     };
 
-    return (
+    screenContent = (
       <div className="min-h-screen bg-[#F8F9FA] flex flex-col">
         <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3 sticky top-0 z-30">
           <button
@@ -1287,8 +1181,17 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
                   const file = e.target.files?.[0];
                   if (file) {
                     setExcelFileName(file.name);
-                    const rows = await parseExcelInventoryFile(file);
-                    setParsedExcelItems(rows);
+                    try {
+                      const rows = await parseExcelInventoryFile(file);
+                      setParsedExcelItems(rows);
+                      if (rows.length === 0) {
+                        showToast('error', 'No valid product rows found in file.');
+                      } else {
+                        showToast('success', `Loaded ${rows.length} rows from ${file.name}`);
+                      }
+                    } catch {
+                      showToast('error', 'Could not read Excel/CSV file.');
+                    }
                   }
                 }}
               />
@@ -1334,12 +1237,7 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
         </div>
       </div>
     );
-  }
-
-  // ============================================================================
-  // SUBSCREEN 4: ADD PRODUCTS MANUALLY SCREEN (Matches 09:02 - 09:10)
-  // ============================================================================
-  if (subScreen === 'manual_add') {
+  } else if (subScreen === 'manual_add') {
     const updateVariantField = <K extends keyof ProductVariantItem>(
       idx: number,
       key: K,
@@ -1348,20 +1246,23 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
       setVariants((prev) => prev.map((v, i) => (i === idx ? { ...v, [key]: val } : v)));
     };
 
-    return (
+    screenContent = (
       <div className="min-h-screen bg-[#FAF9F5] flex flex-col justify-between pb-24">
         {/* Top Navy Header with BOM Button */}
         <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center justify-between sticky top-0 z-30">
           <div className="flex items-center gap-3">
             <button
               type="button"
-              onClick={() => setSubScreen('add_hub')}
+              onClick={() => {
+                resetManualForm();
+                setSubScreen(editingProductId ? 'my_stock' : 'add_hub');
+              }}
               className="w-9 h-9 rounded-xl bg-white/10 flex items-center justify-center"
             >
               <ChevronLeft className="w-5 h-5" />
             </button>
             <h1 className="text-base font-bold truncate max-w-[200px]">
-              Add products manually
+              {editingProductId ? 'Edit product' : 'Add products manually'}
             </h1>
           </div>
           <button
@@ -1408,8 +1309,20 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
               />
 
               <div className="flex items-center justify-end gap-2 relative">
-                <span className="text-xs text-slate-500 font-medium">Quantity:</span>
-                <span className="text-xs font-bold text-slate-800 px-2">{manualQty}</span>
+                <span className="text-xs text-slate-500 font-medium">Qty:</span>
+                <input
+                  type="number"
+                  value={manualQty}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setManualQty(val);
+                    const num = Number(val) || 0;
+                    setVariants((prev) =>
+                      prev.map((v, i) => (i === 0 ? { ...v, quantity: num } : v))
+                    );
+                  }}
+                  className="w-16 bg-white border border-slate-300 rounded-xl px-2.5 py-2 text-xs font-bold text-slate-800 text-center outline-none focus:border-[#0A2540]"
+                />
                 <button
                   type="button"
                   onClick={() => setManualUnitMenuOpen(!manualUnitMenuOpen)}
@@ -1510,8 +1423,14 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
                           value={v.quantity}
                           onChange={(e) => {
                             const val = Number(e.target.value) || 0;
-                            updateVariantField(idx, 'quantity', val);
-                            setManualQty(String(val));
+                            setVariants((prev) => {
+                              const next = prev.map((row, i) =>
+                                i === idx ? { ...row, quantity: val } : row
+                              );
+                              const sum = next.reduce((acc, r) => acc + (Number(r.quantity) || 0), 0);
+                              setManualQty(String(sum));
+                              return next;
+                            });
                           }}
                           className="w-full border border-slate-300 rounded-xl px-3 py-2.5 text-xs outline-none"
                         />
@@ -1537,11 +1456,19 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
                           type="text"
                           value={v.barcode}
                           onChange={(e) => updateVariantField(idx, 'barcode', e.target.value)}
+                          placeholder="Scan or type barcode"
                           className="flex-1 border-b border-slate-400 text-xs py-1 outline-none"
                         />
                         <button
                           type="button"
-                          className="bg-slate-200 text-slate-600 text-xs font-bold px-3 py-1.5 rounded-lg"
+                          onClick={() => {
+                            const nextCode =
+                              v.barcode.trim() ||
+                              String(Math.floor(100000000000 + Math.random() * 900000000000));
+                            updateVariantField(idx, 'barcode', nextCode);
+                            showToast('success', `Barcode ${nextCode} applied`);
+                          }}
+                          className="bg-[#0A2540] text-white text-xs font-bold px-3 py-1.5 rounded-lg"
                         >
                           Add
                         </button>
@@ -1590,8 +1517,17 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
                             value={v.mrp}
                             onChange={(e) => {
                               const n = Number(e.target.value) || 0;
-                              updateVariantField(idx, 'mrp', n);
-                              if (!v.retailPrice) updateVariantField(idx, 'retailPrice', n);
+                              setVariants((prev) =>
+                                prev.map((row, i) =>
+                                  i === idx
+                                    ? {
+                                        ...row,
+                                        mrp: n,
+                                        retailPrice: row.retailPrice ? row.retailPrice : n,
+                                      }
+                                    : row
+                                )
+                              );
                             }}
                             className="w-full text-xs outline-none"
                           />
@@ -1829,18 +1765,21 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
           <div className="max-w-md mx-auto grid grid-cols-2 gap-3">
             <button
               type="button"
-              onClick={() => setSubScreen('add_hub')}
+              onClick={() => {
+                resetManualForm();
+                setSubScreen(editingProductId ? 'my_stock' : 'add_hub');
+              }}
               className="bg-black text-white font-bold text-sm py-3.5 rounded-xl"
             >
               Cancel
             </button>
             <button
               type="button"
-              disabled={savingManual || !manualName.trim()}
+              disabled={savingManual}
               onClick={handleSaveManualProduct}
-              className="bg-[#4CAF50] text-white font-bold text-sm py-3.5 rounded-xl disabled:opacity-50"
+              className="bg-[#4CAF50] text-white font-bold text-sm py-3.5 rounded-xl disabled:opacity-60 active:scale-[0.99]"
             >
-              {savingManual ? 'Saving...' : 'Save'}
+              {savingManual ? 'Saving...' : editingProductId ? 'Update Product' : 'Save'}
             </button>
           </div>
         </div>
@@ -1910,26 +1849,13 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
           </div>
         )}
 
-        <ApkPhotoSheet
-          isOpen={photoSheetTarget === 'manual_product'}
-          onClose={() => setPhotoSheetTarget(null)}
-          title="Product Photo (Camera / Gallery)"
-          onUploaded={(url) => {
-            setUploadingImage(false);
-            setManualImageUrl(url);
-          }}
-        />
       </div>
     );
-  }
-
-  // ============================================================================
-  // DEFAULT SUBSCREEN: MY STOCK SCREEN (Matches 08:08 - 08:30)
-  // ============================================================================
-  return (
+  } else {
+    screenContent = (
     <div className="min-h-screen bg-[#F8F9FA] flex flex-col pb-24">
       {/* Top Navy Header */}
-      <header className="bg-[#0A2540] text-white px-4 py-3 flex items-center justify-between sticky top-0 z-30">
+      <header className="bg-[#0A2540] text-white px-4 py-3 flex items-center justify-between sticky top-0 z-30 relative">
         <div className="flex items-center gap-3">
           <button
             type="button"
@@ -1941,11 +1867,21 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
           <h1 className="text-base font-bold">My Stock</h1>
         </div>
 
-        <div className="flex items-center gap-3">
-          <button type="button" className="p-1.5 hover:opacity-80" title="Watch Tutorial">
+        <div className="flex items-center gap-2.5">
+          <button
+            type="button"
+            onClick={() => setTutorialModalOpen(true)}
+            className="p-1.5 hover:opacity-80"
+            title="Watch Tutorial"
+          >
             <Play className="w-4 h-4 fill-white" />
           </button>
-          <button type="button" className="p-1.5 hover:opacity-80" title="More Options">
+          <button
+            type="button"
+            onClick={() => setMoreMenuOpen((v) => !v)}
+            className="p-1.5 hover:opacity-80"
+            title="More Options"
+          >
             <MoreVertical className="w-4 h-4" />
           </button>
           <button
@@ -1958,13 +1894,63 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => exportStockToExcel(products)}
+            onClick={() => {
+              exportStockToExcel(products);
+              showToast('success', 'Stock exported to Excel!');
+            }}
             className="p-1.5 hover:opacity-80"
             title="Export to Excel"
           >
             <FileSpreadsheet className="w-5 h-5" />
           </button>
         </div>
+
+        {moreMenuOpen && (
+          <div className="absolute right-4 top-13 w-48 bg-white text-slate-800 rounded-2xl shadow-xl border border-slate-200 py-1.5 z-40 text-xs font-bold">
+            <button
+              type="button"
+              onClick={() => {
+                setMoreMenuOpen(false);
+                setQaAddToInventory(true);
+                setQuickAddOpen(true);
+              }}
+              className="w-full text-left px-4 py-2.5 hover:bg-slate-50"
+            >
+              + Quick Add Product
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMoreMenuOpen(false);
+                resetManualForm();
+                setSubScreen('manual_add');
+              }}
+              className="w-full text-left px-4 py-2.5 hover:bg-slate-50"
+            >
+              + Manual Add Product
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMoreMenuOpen(false);
+                setSubScreen('purchase_entry');
+              }}
+              className="w-full text-left px-4 py-2.5 hover:bg-slate-50"
+            >
+              Purchase Entry
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMoreMenuOpen(false);
+                setSubScreen('excel_import');
+              }}
+              className="w-full text-left px-4 py-2.5 hover:bg-slate-50"
+            >
+              Excel Import
+            </button>
+          </div>
+        )}
       </header>
 
       <div className="p-4 space-y-3.5 max-w-md mx-auto w-full">
@@ -2171,67 +2157,163 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
 
         {/* Product List */}
         <div className="space-y-2.5 pt-1">
-          {filteredProducts.map((p) => (
-            <div
-              key={p.id}
-              className="bg-white rounded-2xl border border-slate-200 p-3.5 flex items-center justify-between shadow-xs"
-            >
-              <div className="flex items-center gap-3">
-                <div className="w-12 h-12 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center overflow-hidden shrink-0">
-                  {p.imageUrl ? (
-                    <img
-                      src={p.imageUrl}
-                      alt={p.name}
-                      referrerPolicy="no-referrer"
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <span className="text-lg">📦</span>
-                  )}
-                </div>
-                <div>
-                  <h4 className="text-sm font-extrabold text-[#0A2540]">{p.name}</h4>
-                  <p className="text-xs text-slate-500">
-                    Retail: <span className="font-bold text-slate-800">₹{p.retailPrice}</span> ·
-                    MRP: ₹{p.mrp}
-                  </p>
-                  {p.barcode && (
-                    <p className="text-[10px] font-mono text-slate-400 mt-0.5">#{p.barcode}</p>
-                  )}
-                </div>
+          {filteredProducts.length === 0 ? (
+            <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center space-y-3">
+              <div className="w-16 h-16 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mx-auto">
+                <ShoppingCart className="w-8 h-8" />
               </div>
-
-              <div className="text-right flex flex-col items-end gap-1">
-                <span
-                  className={`text-xs font-extrabold px-2.5 py-1 rounded-lg tabular-nums ${
-                    p.quantity <= p.lowStockAlert
-                      ? 'bg-red-50 text-red-700'
-                      : 'bg-emerald-50 text-emerald-700'
-                  }`}
+              <div>
+                <h3 className="text-sm font-extrabold text-[#0A2540]">
+                  {stockTab === 'all' ? 'All Stocks 0' : `No ${stockTab} stock found`}
+                </h3>
+                <p className="text-xs text-slate-400 mt-1">
+                  Tap &ldquo;Add Product&rdquo; or &ldquo;Quick Add&rdquo; to add your inventory.
+                </p>
+              </div>
+              <div className="flex items-center justify-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setQaAddToInventory(true);
+                    setQuickAddOpen(true);
+                  }}
+                  className="bg-[#0A2540] text-white text-xs font-bold px-4 py-2.5 rounded-xl"
                 >
-                  {p.quantity} {p.unit}
-                </span>
-                <div className="flex items-center gap-2 mt-1">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      saveProductToDb(uid, { ...p, archived: !p.archived })
-                    }
-                    className="text-[10px] text-slate-400 hover:text-slate-700"
-                  >
-                    {p.archived ? 'Unarchive' : 'Archive'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => deleteProductFromDb(uid, p.id)}
-                    className="text-[10px] text-red-500 hover:underline"
-                  >
-                    Delete
-                  </button>
-                </div>
+                  + Quick Add
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    resetManualForm();
+                    setSubScreen('manual_add');
+                  }}
+                  className="bg-slate-100 text-[#0A2540] text-xs font-bold px-4 py-2.5 rounded-xl"
+                >
+                  Manual Add
+                </button>
               </div>
             </div>
-          ))}
+          ) : (
+            filteredProducts.map((p) => (
+              <div
+                key={p.id}
+                className="bg-white rounded-2xl border border-slate-200 p-3.5 flex items-center justify-between shadow-xs gap-2"
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-12 h-12 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center overflow-hidden shrink-0">
+                    {p.imageUrl ? (
+                      <img
+                        src={p.imageUrl}
+                        alt={p.name}
+                        referrerPolicy="no-referrer"
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <span className="text-lg">📦</span>
+                    )}
+                  </div>
+                  <div className="min-w-0">
+                    <h4 className="text-sm font-extrabold text-[#0A2540] truncate">{p.name}</h4>
+                    <p className="text-xs text-slate-500">
+                      Retail: <span className="font-bold text-slate-800">₹{p.retailPrice}</span> ·
+                      MRP: ₹{p.mrp}
+                    </p>
+                    {p.barcode && (
+                      <p className="text-[10px] font-mono text-slate-400 mt-0.5 truncate">
+                        #{p.barcode}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="text-right flex flex-col items-end gap-1.5 shrink-0">
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          await saveProductToDb(uid, {
+                            ...p,
+                            quantity: Math.max(0, (Number(p.quantity) || 0) - 1),
+                          });
+                        } catch {
+                          showToast('error', 'Failed to update stock');
+                        }
+                      }}
+                      className="w-6 h-6 rounded-md bg-slate-100 text-slate-700 font-bold text-xs flex items-center justify-center"
+                      title="Decrease Qty"
+                    >
+                      -
+                    </button>
+                    <span
+                      className={`text-xs font-extrabold px-2 py-1 rounded-lg tabular-nums ${
+                        p.quantity <= p.lowStockAlert
+                          ? 'bg-red-50 text-red-700'
+                          : 'bg-emerald-50 text-emerald-700'
+                      }`}
+                    >
+                      {p.quantity} {p.unit}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          await saveProductToDb(uid, {
+                            ...p,
+                            quantity: (Number(p.quantity) || 0) + 1,
+                          });
+                        } catch {
+                          showToast('error', 'Failed to update stock');
+                        }
+                      }}
+                      className="w-6 h-6 rounded-md bg-slate-100 text-slate-700 font-bold text-xs flex items-center justify-center"
+                      title="Increase Qty"
+                    >
+                      +
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => openEditProduct(p)}
+                      className="text-[11px] font-bold text-[#1565c0] flex items-center gap-0.5"
+                    >
+                      <Edit3 className="w-3 h-3" />
+                      <span>Edit</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          await saveProductToDb(uid, { ...p, archived: !p.archived });
+                          showToast('success', p.archived ? 'Product restored' : 'Product archived');
+                        } catch {
+                          showToast('error', 'Failed to update product');
+                        }
+                      }}
+                      className="text-[11px] text-slate-500 hover:text-slate-700"
+                    >
+                      {p.archived ? 'Restore' : 'Archive'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          await deleteProductFromDb(uid, p.id);
+                          showToast('success', 'Product deleted');
+                        } catch {
+                          showToast('error', 'Failed to delete product');
+                        }
+                      }}
+                      className="text-[11px] text-red-500 hover:underline"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
         </div>
       </div>
 
@@ -2244,14 +2326,325 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
         <ShoppingCart className="w-4 h-4" />
         <span>Add Product</span>
       </button>
+    </div>
+    );
+  }
+
+  return (
+    <>
+      {screenContent}
+
+      {/* Global Toast Notification */}
+      {toast && (
+        <div
+          className={`fixed top-16 left-1/2 -translate-x-1/2 z-[70] w-[90%] max-w-sm rounded-2xl px-4 py-3 shadow-xl flex items-center gap-2.5 text-xs font-bold text-white ${
+            toast.type === 'error' ? 'bg-red-600' : 'bg-emerald-600'
+          }`}
+        >
+          {toast.type === 'error' ? (
+            <AlertCircle className="w-4 h-4 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+          )}
+          <span className="flex-1">{toast.msg}</span>
+          <button type="button" onClick={() => setToast(null)}>
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Global Quick Add Bottom Sheet (Works across add_hub, my_stock, purchase_entry) */}
+      {quickAddOpen && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-end justify-center">
+          <div className="bg-white w-full max-w-md rounded-t-3xl p-5 max-h-[90vh] overflow-y-auto space-y-3.5">
+            <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-1" />
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-slate-100 flex items-center justify-center font-bold text-slate-800">
+                  +
+                </div>
+                <h3 className="text-base font-extrabold text-[#0A2540]">Quick add</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setQaVariant(qaVariant || 'Standard')}
+                className="bg-[#0e5a7a] text-white text-xs font-bold px-3.5 py-2 rounded-xl"
+              >
+                Variant of?
+              </button>
+            </div>
+
+            <label className="flex items-center gap-2.5 bg-slate-50 border border-slate-200 rounded-xl p-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={qaAddToInventory}
+                onChange={(e) => setQaAddToInventory(e.target.checked)}
+                className="w-4 h-4 accent-[#0A2540]"
+              />
+              <span className="text-xs font-bold text-[#0A2540]">Add to Inventory</span>
+            </label>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 mb-1">Barcode</label>
+              <div className="flex items-center border border-slate-300 rounded-xl px-3 py-2 gap-2">
+                <input
+                  type="text"
+                  value={qaBarcode}
+                  onChange={(e) => setQaBarcode(e.target.value)}
+                  placeholder="Enter or scan barcode"
+                  className="flex-1 text-sm outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => onOpenScanner((c) => setQaBarcode(c))}
+                  className="text-slate-600 p-1"
+                >
+                  <ScanLine className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setQaBarcode(String(Math.floor(100000000000 + Math.random() * 900000000000)))
+                  }
+                  className="text-slate-600 p-1"
+                  title="Auto-generate barcode"
+                >
+                  <Sparkles className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 mb-1">
+                Product Name *
+              </label>
+              <input
+                type="text"
+                value={qaName}
+                onChange={(e) => setQaName(e.target.value)}
+                placeholder="Enter Product Name"
+                className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 mb-1">
+                Variant Name <span className="text-slate-400 font-normal">(optional)</span>
+              </label>
+              <input
+                type="text"
+                value={qaVariant}
+                onChange={(e) => setQaVariant(e.target.value)}
+                placeholder="e.g. 500ml, Red, Large"
+                className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">MRP *</label>
+                <input
+                  type="number"
+                  value={qaMrp}
+                  onChange={(e) => {
+                    setQaMrp(e.target.value);
+                    if (qaRetail === '0.00' || !qaRetail) setQaRetail(e.target.value);
+                  }}
+                  className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">
+                  Retail Price *
+                </label>
+                <input
+                  type="number"
+                  value={qaRetail}
+                  onChange={(e) => setQaRetail(e.target.value)}
+                  className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 items-end">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">
+                  Quantity *
+                </label>
+                <input
+                  type="number"
+                  value={qaQty}
+                  onChange={(e) => setQaQty(e.target.value)}
+                  className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none"
+                />
+              </div>
+              <div>
+                <select
+                  value={qaUnit}
+                  onChange={(e) => setQaUnit(e.target.value)}
+                  className="w-full bg-slate-100 border border-slate-200 rounded-xl px-3.5 py-2.5 text-sm font-semibold text-slate-800 outline-none"
+                >
+                  {UNITS_LIST.map((u) => (
+                    <option key={u} value={u}>
+                      {u}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="border border-slate-200 rounded-xl overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setQaAdditionalOpen(!qaAdditionalOpen)}
+                className="w-full px-3.5 py-3 flex items-center justify-between text-xs font-bold text-[#0A2540] bg-slate-50"
+              >
+                <span>Additional Details (Optional)</span>
+                {qaAdditionalOpen ? (
+                  <ChevronUp className="w-4 h-4" />
+                ) : (
+                  <ChevronDown className="w-4 h-4" />
+                )}
+              </button>
+              {qaAdditionalOpen && (
+                <div className="p-3.5 space-y-3 bg-white">
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-[11px] text-slate-500 mb-1">
+                        Wholesale price
+                      </label>
+                      <input
+                        type="number"
+                        placeholder="₹"
+                        value={qaWholesale}
+                        onChange={(e) => setQaWholesale(e.target.value)}
+                        className="w-full border border-slate-300 rounded-xl px-3 py-2 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-500 mb-1">Cess</label>
+                      <input
+                        type="number"
+                        value={qaCess}
+                        onChange={(e) => setQaCess(e.target.value)}
+                        className="w-full border border-slate-300 rounded-xl px-3 py-2 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-500 mb-1">GST</label>
+                      <input
+                        type="number"
+                        value={qaGst}
+                        onChange={(e) => setQaGst(e.target.value)}
+                        className="w-full border border-slate-300 rounded-xl px-3 py-2 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-500 mb-1">Hsn</label>
+                      <input
+                        type="text"
+                        value={qaHsn}
+                        onChange={(e) => setQaHsn(e.target.value)}
+                        className="w-full border border-slate-300 rounded-xl px-3 py-2 text-xs"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-500 mb-1">
+                      Purchase price
+                    </label>
+                    <input
+                      type="number"
+                      value={qaPurchasePrice}
+                      onChange={(e) => setQaPurchasePrice(e.target.value)}
+                      className="w-full border border-slate-300 rounded-xl px-3 py-2 text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-500 mb-1">
+                      Rack (optional)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. A1, D6"
+                      value={qaRack}
+                      onChange={(e) => setQaRack(e.target.value)}
+                      className="w-full border border-slate-300 rounded-xl px-3 py-2 text-xs"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setQuickAddOpen(false)}
+                className="py-3 rounded-xl border border-slate-300 font-bold text-sm text-slate-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={savingQuickAdd}
+                onClick={handleSaveQuickAdd}
+                className="py-3 rounded-xl bg-[#0A2540] text-white font-bold text-sm disabled:opacity-60"
+              >
+                {savingQuickAdd ? 'Saving...' : 'Add Product'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Stock Quick Tutorial Modal */}
+      {tutorialModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl p-5 w-full max-w-xs space-y-3 shadow-2xl">
+            <h3 className="text-base font-extrabold text-[#0A2540]">Inventory Quick Guide</h3>
+            <ul className="text-xs text-slate-600 space-y-2 list-disc pl-4">
+              <li>Use <strong>Quick Add</strong> or <strong>Manual Add</strong> to save products with barcodes & variants.</li>
+              <li>Tap <strong>Edit</strong> or <strong>+/-</strong> on any stock card to update prices or quantities anytime.</li>
+              <li>Use <strong>Purchase Entry</strong> to record supplier bills & increment stock automatically.</li>
+            </ul>
+            <button
+              type="button"
+              onClick={() => setTutorialModalOpen(false)}
+              className="w-full bg-[#0A2540] text-white text-xs font-bold py-3 rounded-xl"
+            >
+              Got it
+            </button>
+          </div>
+        </div>
+      )}
 
       <SmartVoiceModal
         isOpen={voiceModalOpen}
         onClose={() => setVoiceModalOpen(false)}
         context={voiceContext}
         onVoiceApplied={handleVoiceResultApplied}
-        title="🎙️ Voice Search Stock"
+        title={voiceContext === 'search' ? '🎙️ Voice Search Stock' : '🎙️ AI Voice Purchase Entry'}
       />
-    </div>
+
+      <ApkPhotoSheet
+        isOpen={photoSheetTarget !== null}
+        onClose={() => setPhotoSheetTarget(null)}
+        title={
+          photoSheetTarget === 'purchase_bill'
+            ? 'Attach Supplier Bill Photo'
+            : 'Product Photo (Camera / Gallery)'
+        }
+        onUploaded={(url) => {
+          if (photoSheetTarget === 'purchase_bill') {
+            setPurBillUrl(url);
+            showToast('success', 'Bill photo attached!');
+          } else {
+            setUploadingImage(false);
+            setManualImageUrl(url);
+            showToast('success', 'Product photo uploaded!');
+          }
+        }}
+      />
+    </>
   );
 };

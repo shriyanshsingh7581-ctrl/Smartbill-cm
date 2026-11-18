@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   ChevronLeft,
   Play,
@@ -21,6 +21,8 @@ import {
   Check,
   Settings,
   Wrench,
+  CheckCircle2,
+  AlertCircle,
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
@@ -170,6 +172,35 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
   const [baudRate, setBaudRate] = useState('9600');
   const [scaleConnected, setScaleConnected] = useState(false);
   const [liveWeight, setLiveWeight] = useState('---');
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const showToast = (text: string, type: 'success' | 'error' = 'success') => {
+    setToast({ type, text });
+    setTimeout(() => {
+      setToast((prev) => (prev?.text === text ? null : prev));
+    }, 3200);
+  };
+
+  useEffect(() => {
+    if (profile.config?.invoice) {
+      setInvConfig(profile.config.invoice);
+    }
+    if (profile.config?.billing) {
+      setBillConfig(profile.config.billing);
+    }
+  }, [profile.config]);
+
+  useEffect(() => {
+    if (profile.shopName && customPamphletTitle === 'Shop Name') {
+      setCustomPamphletTitle(profile.shopName);
+    }
+  }, [profile.shopName, customPamphletTitle]);
+
+  useEffect(() => {
+    if (!selectedMarketingProd && products.length > 0) {
+      setSelectedMarketingProd(products[0]);
+    }
+  }, [products, selectedMarketingProd]);
 
   const triggerInvoicePreviewRefresh = (updater: (prev: InvoiceSettingsConfig) => InvoiceSettingsConfig) => {
     setInvPreviewRefreshing(true);
@@ -177,10 +208,33 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
     setTimeout(() => setInvPreviewRefreshing(false), 320);
   };
 
-  const shareViaWhatsApp = (text: string) => {
+  const shareViaWhatsApp = async (text: string) => {
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: profile.shopName || 'SmartBill CM', text });
+        showToast('Shared successfully!');
+        return;
+      }
+    } catch {
+      // user cancelled or unsupported in WebView
+    }
+    try {
+      await navigator.clipboard?.writeText(text);
+      showToast('Offer copied! Opening WhatsApp...');
+    } catch {
+      // ignore clipboard error
+    }
     const url = `https://wa.me/?text=${encodeURIComponent(text)}`;
-    window.open(url, '_blank', 'noopener,noreferrer');
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.target = '_blank';
+    anchor.rel = 'noopener noreferrer';
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
   };
+
+  let screenContent: React.ReactNode = null;
 
   // ============================================================================
   // SECTION A: MARKETING TOOLS
@@ -188,7 +242,7 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
   if (section === 'marketing') {
     // 1. Share Catalogue (Matches 00:08)
     if (marketingScreen === 'share_catalogue') {
-      return (
+      screenContent = (
         <div className="min-h-screen bg-[#FAF9F5] flex flex-col justify-between">
           <div>
             <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3 sticky top-0 z-30">
@@ -281,8 +335,8 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
     }
 
     // 2. Share Products Categories (Matches 00:14)
-    if (marketingScreen === 'share_products_cats') {
-      return (
+    else if (marketingScreen === 'share_products_cats') {
+      screenContent = (
         <div className="min-h-screen bg-[#FAF9F5] flex flex-col">
           <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3 sticky top-0 z-30">
             <button
@@ -369,7 +423,7 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
     }
 
     // 3. Share Products Poster Editor (Matches 00:16, 00:19, 00:21)
-    if (marketingScreen === 'share_products_editor') {
+    else if (marketingScreen === 'share_products_editor') {
       const cfg =
         prodShareType === 'discount'
           ? {
@@ -398,7 +452,7 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
                 badgeColor: 'bg-red-600 text-white',
               };
 
-      return (
+      screenContent = (
         <div className="min-h-screen bg-[#FAF9F5] flex flex-col justify-between pb-24">
           <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3 sticky top-0 z-30">
             <button
@@ -489,7 +543,7 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
               <button
                 type="button"
                 onClick={() =>
-                  downloadElementAsImage('marketing-product-poster', 'BillingFast_Product_Poster')
+                  downloadElementAsImage('marketing-product-poster', 'SmartBillCM_Product_Poster')
                 }
                 className="bg-emerald-50 border border-emerald-200 text-emerald-700 font-bold text-xs py-3 rounded-xl flex items-center justify-center gap-1.5"
               >
@@ -542,7 +596,7 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
     }
 
     // 4. Business Cards (14 Visual Templates - Matches 00:30 - 00:35)
-    if (marketingScreen === 'business_cards') {
+    else if (marketingScreen === 'business_cards') {
       const cardThemes = [
         { id: 1, bg: 'bg-slate-100', text: 'text-red-800', accent: 'border-b-4 border-red-800' },
         { id: 2, bg: 'bg-[#ffd600]', text: 'text-slate-900', accent: 'border-y-2 border-slate-800' },
@@ -560,7 +614,7 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
         { id: 14, bg: 'bg-slate-100', text: 'text-orange-600', accent: '' },
       ];
 
-      return (
+      screenContent = (
         <div className="min-h-screen bg-[#FAF9F5] flex flex-col">
           <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3 sticky top-0 z-30">
             <button
@@ -646,13 +700,13 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
     }
 
     // 5. Share Greetings
-    if (marketingScreen === 'share_greetings') {
+    else if (marketingScreen === 'share_greetings') {
       const greetings = [
         { id: 'g1', title: 'Happy Diwali & New Year', sub: 'Wishing prosperity & joy from our store!', bg: 'from-amber-500 to-red-600' },
         { id: 'g2', title: 'Festive Season Special', sub: 'Thank you for shopping with us!', bg: 'from-emerald-600 to-teal-800' },
         { id: 'g3', title: 'Weekend Super Saver', sub: 'Visit us today for fresh arrivals!', bg: 'from-indigo-600 to-blue-900' },
       ];
-      return (
+      screenContent = (
         <div className="min-h-screen bg-[#FAF9F5] flex flex-col">
           <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3 sticky top-0 z-30">
             <button
@@ -704,11 +758,11 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
     }
 
     // 6. Share Wallet Benefits (Matches 00:38 - 00:54)
-    if (marketingScreen === 'wallet_offers') {
+    else if (marketingScreen === 'wallet_offers') {
       const currentPreset =
         WALLET_OFFER_PRESETS.find((o) => o.id === selectedWalletOfferId) || WALLET_OFFER_PRESETS[0];
 
-      return (
+      screenContent = (
         <div className="min-h-screen bg-[#FAF9F5] flex flex-col pb-10">
           <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3 sticky top-0 z-30">
             <button
@@ -873,19 +927,24 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
     }
 
     // 7. Share Pamphlets (Matches 00:56 - 01:21)
-    if (marketingScreen === 'pamphlets') {
+    else if (marketingScreen === 'pamphlets') {
       const slotCount = activePamphletPage === 1 ? 20 : 10;
       const filledCount = Object.values(pamphletSlots).filter(Boolean).length;
 
       const handleFillAllSlots = () => {
+        if (products.length === 0) {
+          showToast('Add products to stock first to fill pamphlet slots', 'error');
+          return;
+        }
         const next: Record<number, ProductDoc | null> = {};
         for (let i = 1; i <= slotCount; i++) {
-          next[i] = products[(i - 1) % Math.max(1, products.length)] || null;
+          next[i] = products[(i - 1) % products.length] || null;
         }
         setPamphletSlots(next);
+        showToast('Pamphlet slots filled from your stock!');
       };
 
-      return (
+      screenContent = (
         <div className="min-h-screen bg-[#FAF9F5] flex flex-col pb-32">
           <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3 sticky top-0 z-30">
             <button
@@ -936,7 +995,7 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
                           {customPamphletTitle}
                         </h4>
                         <p className="text-[9px] text-lime-950 font-semibold">
-                          https://billingfast.com/shop/{profile.phone.replace(/[^0-9]/g, '')}
+                          https://smartbillcm.shop/{profile.phone.replace(/[^0-9]/g, '')}
                         </p>
                       </div>
                       <div className="flex items-center gap-2">
@@ -1272,93 +1331,101 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
       );
     }
 
-    // Default Marketing Hub (Matches 00:03)
-    const marketingItems = [
-      {
-        id: 'share_products_cats' as const,
-        title: 'Share Products with your customer',
-        sub: 'Share individual products directly with customers',
-        icon: <Share2 className="w-5 h-5 text-[#1976d2]" />,
-        bg: 'bg-blue-50',
-      },
-      {
-        id: 'share_catalogue' as const,
-        title: 'Share Catalogue',
-        sub: 'Create and share your complete product catalogue',
-        icon: <BookOpen className="w-5 h-5 text-emerald-600" />,
-        bg: 'bg-emerald-50',
-      },
-      {
-        id: 'share_greetings' as const,
-        title: 'Share Greetings',
-        sub: 'Send festival and special occasion greetings',
-        icon: <PartyPopper className="w-5 h-5 text-purple-600" />,
-        bg: 'bg-purple-50',
-      },
-      {
-        id: 'business_cards' as const,
-        title: 'Business Card',
-        sub: 'Create and share your digital business card',
-        icon: <CreditCard className="w-5 h-5 text-amber-600" />,
-        bg: 'bg-amber-50',
-      },
-      {
-        id: 'wallet_offers' as const,
-        title: 'Share Wallet Offers',
-        sub: 'Share wallet benefits with your customers.',
-        icon: <Wallet className="w-5 h-5 text-sky-600" />,
-        bg: 'bg-sky-50',
-      },
-      {
-        id: 'pamphlets' as const,
-        title: 'Share Pamphlets',
-        sub: 'Create engaging offer pamphlets for your store promotions or ads.',
-        icon: <ImageIcon className="w-5 h-5 text-indigo-600" />,
-        bg: 'bg-indigo-50',
-      },
-    ];
+    else {
+      // Default Marketing Hub (Matches 00:03)
+      const marketingItems = [
+        {
+          id: 'share_products_cats' as const,
+          title: 'Share Products with your customer',
+          sub: 'Share individual products directly with customers',
+          icon: <Share2 className="w-5 h-5 text-[#1976d2]" />,
+          bg: 'bg-blue-50',
+        },
+        {
+          id: 'share_catalogue' as const,
+          title: 'Share Catalogue',
+          sub: 'Create and share your complete product catalogue',
+          icon: <BookOpen className="w-5 h-5 text-emerald-600" />,
+          bg: 'bg-emerald-50',
+        },
+        {
+          id: 'share_greetings' as const,
+          title: 'Share Greetings',
+          sub: 'Send festival and special occasion greetings',
+          icon: <PartyPopper className="w-5 h-5 text-purple-600" />,
+          bg: 'bg-purple-50',
+        },
+        {
+          id: 'business_cards' as const,
+          title: 'Business Card',
+          sub: 'Create and share your digital business card',
+          icon: <CreditCard className="w-5 h-5 text-amber-600" />,
+          bg: 'bg-amber-50',
+        },
+        {
+          id: 'wallet_offers' as const,
+          title: 'Share Wallet Offers',
+          sub: 'Share wallet benefits with your customers.',
+          icon: <Wallet className="w-5 h-5 text-sky-600" />,
+          bg: 'bg-sky-50',
+        },
+        {
+          id: 'pamphlets' as const,
+          title: 'Share Pamphlets',
+          sub: 'Create engaging offer pamphlets for your store promotions or ads.',
+          icon: <ImageIcon className="w-5 h-5 text-indigo-600" />,
+          bg: 'bg-indigo-50',
+        },
+      ];
 
-    return (
-      <div className="min-h-screen bg-[#FAF9F5] flex flex-col">
-        <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center justify-between sticky top-0 z-30">
-          <button
-            type="button"
-            onClick={onBackToHome}
-            className="w-9 h-9 rounded-xl bg-white/10 flex items-center justify-center"
-          >
-            <ChevronLeft className="w-5 h-5" />
-          </button>
-          <h1 className="text-base font-bold">Marketing Tools</h1>
-          <Play className="w-4 h-4 fill-white" />
-        </header>
-
-        <div className="p-4 space-y-3 max-w-md mx-auto w-full">
-          {marketingItems.map((item) => (
+      screenContent = (
+        <div className="min-h-screen bg-[#FAF9F5] flex flex-col">
+          <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center justify-between sticky top-0 z-30">
             <button
-              key={item.id}
               type="button"
-              onClick={() => setMarketingScreen(item.id)}
-              className="w-full bg-white border border-slate-200 rounded-2xl p-4 flex items-center justify-between shadow-xs text-left active:scale-[0.99] transition-transform"
+              onClick={onBackToHome}
+              className="w-9 h-9 rounded-xl bg-white/10 flex items-center justify-center"
             >
-              <div className="flex items-center gap-3.5">
-                <div
-                  className={`w-11 h-11 rounded-xl ${item.bg} flex items-center justify-center shrink-0`}
-                >
-                  {item.icon}
-                </div>
-                <div>
-                  <h3 className="text-sm font-extrabold text-[#0A2540] leading-snug">
-                    {item.title}
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">{item.sub}</p>
-                </div>
-              </div>
-              <ChevronRight className="w-4 h-4 text-slate-400 shrink-0 ml-2" />
+              <ChevronLeft className="w-5 h-5" />
             </button>
-          ))}
+            <h1 className="text-base font-bold">Marketing Tools</h1>
+            <button
+              type="button"
+              onClick={() => showToast('Tap any marketing tool below to create & share on WhatsApp!')}
+              title="Tutorial"
+            >
+              <Play className="w-4 h-4 fill-white" />
+            </button>
+          </header>
+
+          <div className="p-4 space-y-3 max-w-md mx-auto w-full">
+            {marketingItems.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setMarketingScreen(item.id)}
+                className="w-full bg-white border border-slate-200 rounded-2xl p-4 flex items-center justify-between shadow-xs text-left active:scale-[0.99] transition-transform"
+              >
+                <div className="flex items-center gap-3.5">
+                  <div
+                    className={`w-11 h-11 rounded-xl ${item.bg} flex items-center justify-center shrink-0`}
+                  >
+                    {item.icon}
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-extrabold text-[#0A2540] leading-snug">
+                      {item.title}
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">{item.sub}</p>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-slate-400 shrink-0 ml-2" />
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
-    );
+      );
+    }
   }
 
   // ============================================================================
@@ -1366,7 +1433,7 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
   // ============================================================================
 
   // 1. Customize Invoice Screen (Matches 01:46 - 02:34)
-  if (printerScreen === 'customize_invoice') {
+  else if (printerScreen === 'customize_invoice') {
     const sampleRows = [
       { sr: 1, name: 'Product F', qty: '1 Kg', mrp: 100.0, sp: 90.0, total: 90.0 },
       { sr: 2, name: 'Product E', qty: '2 Kg', mrp: 108.0, sp: 97.0, total: 194.0 },
@@ -1375,6 +1442,19 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
       { sr: 5, name: 'Product B', qty: '5 Kg', mrp: 132.0, sp: 118.0, total: 590.0 },
       { sr: 6, name: 'Product A', qty: '6 Kg', mrp: 140.0, sp: 125.0, total: 750.0 },
     ];
+
+    const liveDatePretty = new Date().toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    }) + ' ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    const liveDateThermal =
+      `${String(new Date().getDate()).padStart(2, '0')}-${String(new Date().getMonth() + 1).padStart(
+        2,
+        '0'
+      )}-${new Date().getFullYear()} ` +
+      new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
     const handleSaveInvoiceSettings = async () => {
       setSavingSettings(true);
@@ -1385,13 +1465,16 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
             invoice: invConfig,
           },
         });
+        showToast('Invoice settings saved!');
         setPrinterScreen('printer_hub');
+      } catch (err: any) {
+        showToast(err?.message || 'Failed to save invoice settings', 'error');
       } finally {
         setSavingSettings(false);
       }
     };
 
-    return (
+    screenContent = (
       <div className="min-h-screen bg-[#FAF9F5] flex flex-col pb-24">
         <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3 sticky top-0 z-30">
           <button
@@ -1452,7 +1535,7 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
                       </div>
                       <div className="flex justify-between border-b border-slate-400 pb-0.5">
                         <span className="font-bold">Invoice Date</span>
-                        <span>Nov 17, 2026 21:20</span>
+                        <span>{liveDatePretty}</span>
                       </div>
                       <div className="flex justify-between">
                         <span className="font-bold">Payment</span>
@@ -1506,7 +1589,7 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
                     <p>123 Preview Lane, Flutter City</p>
                   </div>
                   <div className="flex justify-between text-[9px] border-b border-slate-800 pb-1 font-bold">
-                    <span>17-11-2026 09:20 PM</span>
+                    <span>{liveDateThermal}</span>
                     <span>INVOICE 1001</span>
                   </div>
                   <div className="grid grid-cols-12 font-bold border-b border-slate-800 pb-0.5 text-[9px]">
@@ -1907,7 +1990,7 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
   }
 
   // 2. Customize Billing Screen (Matches 02:40 - 03:05)
-  if (printerScreen === 'customize_billing') {
+  else if (printerScreen === 'customize_billing') {
     const billingTabs: (typeof billTab)[] = [
       'Defaults',
       'Billing',
@@ -1927,13 +2010,16 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
             billing: billConfig,
           },
         });
+        showToast('Billing settings saved!');
         setPrinterScreen('printer_hub');
+      } catch (err: any) {
+        showToast(err?.message || 'Failed to save billing settings', 'error');
       } finally {
         setSavingSettings(false);
       }
     };
 
-    return (
+    screenContent = (
       <div className="min-h-screen bg-[#FAF9F5] flex flex-col pb-24">
         <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3 sticky top-0 z-30">
           <button
@@ -2255,7 +2341,7 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
   }
 
   // 3. Weighing Scale Screen (Matches 03:09 - 03:12)
-  if (printerScreen === 'weighing_scale') {
+  else if (printerScreen === 'weighing_scale') {
     const handleConnectScale = async () => {
       try {
         const nav = navigator as unknown as {
@@ -2266,16 +2352,19 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
           await port.open({ baudRate: Number(baudRate) || 9600 });
           setScaleConnected(true);
           setLiveWeight('1.250');
+          showToast('USB weighing scale connected!');
           return;
         }
       } catch {
-        // fallback simulation
+        // fallback simulated mode if Web Serial not supported on WebView
       }
-      setScaleConnected(!scaleConnected);
-      setLiveWeight(!scaleConnected ? '1.000' : '---');
+      const next = !scaleConnected;
+      setScaleConnected(next);
+      setLiveWeight(next ? '1.000' : '---');
+      showToast(next ? 'Scale connected in test mode' : 'Scale disconnected');
     };
 
-    return (
+    screenContent = (
       <div className="min-h-screen bg-[#FAF9F5] flex flex-col">
         <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3 sticky top-0 z-30">
           <button
@@ -2374,7 +2463,8 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
   }
 
   // Default Printer Hub (Matches 01:44)
-  return (
+  else {
+  screenContent = (
     <div className="min-h-screen bg-[#FAF9F5] flex flex-col">
       <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3 sticky top-0 z-30">
         <button
@@ -2475,15 +2565,44 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
           <input
             type="checkbox"
             checked={profile.config.showAppTutorials}
-            onChange={(e) =>
-              updateUserProfile(uid, {
-                config: { ...profile.config, showAppTutorials: e.target.checked },
-              })
-            }
+            onChange={async (e) => {
+              try {
+                await updateUserProfile(uid, {
+                  config: { ...profile.config, showAppTutorials: e.target.checked },
+                });
+                showToast('Tutorial setting updated');
+              } catch (err: any) {
+                showToast(err?.message || 'Could not update setting', 'error');
+              }
+            }}
             className="w-5 h-5 accent-[#0A2540]"
           />
         </div>
       </div>
     </div>
+  );
+  }
+
+  return (
+    <>
+      {screenContent}
+      {toast && (
+        <div
+          className={`fixed top-16 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 rounded-2xl shadow-xl flex items-center gap-2 text-xs font-bold max-w-xs w-[90%] ${
+            toast.type === 'error' ? 'bg-red-600 text-white' : 'bg-[#0A2540] text-white'
+          }`}
+        >
+          {toast.type === 'error' ? (
+            <AlertCircle className="w-4 h-4 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <span className="flex-1">{toast.text}</span>
+          <button type="button" onClick={() => setToast(null)}>
+            <X className="w-3.5 h-3.5 opacity-80" />
+          </button>
+        </div>
+      )}
+    </>
   );
 };

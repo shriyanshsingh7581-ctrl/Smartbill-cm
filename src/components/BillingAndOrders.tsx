@@ -17,6 +17,7 @@ import {
   Trash2,
   UserPlus,
   Mic,
+  X,
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
@@ -151,11 +152,22 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
   const [summaryExpanded, setSummaryExpanded] = useState(false);
 
   // Sale Returns state
+  const [returnSearch, setReturnSearch] = useState('');
   const [createReturnSheet, setCreateReturnSheet] = useState(false);
   const [returnFromInvoiceModal, setReturnFromInvoiceModal] = useState(false);
   const [returnFromPhoneModal, setReturnFromPhoneModal] = useState(false);
   const [returnInvoiceInput, setReturnInvoiceInput] = useState('');
   const [returnPhoneInput, setReturnPhoneInput] = useState('+91');
+
+  // Past Orders date toggle & Toast state
+  const [filterByDate, setFilterByDate] = useState(false);
+  const [savingQuickAddPos, setSavingQuickAddPos] = useState(false);
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+
+  const showToast = (type: 'success' | 'error', msg: string) => {
+    setToast({ type, msg });
+    setTimeout(() => setToast(null), 3200);
+  };
 
   const triggerEmptyCartToast = () => {
     setEmptyCartToast(true);
@@ -194,47 +206,59 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
   };
 
   const handleSaveQuickAddPos = async () => {
-    if (!qaName.trim()) return;
+    if (!qaName.trim()) {
+      showToast('error', 'Please enter Product Name / प्रोडक्ट का नाम भरें');
+      return;
+    }
     const mrpVal = Number(qaMrp) || 0;
     const retailVal = Number(qaRetail) || mrpVal;
     const qtyVal = Number(qaQty) || 1;
-    let prodId = `quick_${Date.now()}`;
-    if (qaAddToInv) {
-      prodId = await saveProductToDb(uid, {
-        name: qaName.trim(),
-        variantName: qaVariant.trim(),
-        barcode: qaBarcode.trim(),
-        unit: qaUnit,
-        mrp: mrpVal,
-        retailPrice: retailVal,
-        quantity: qtyVal,
-        archived: false,
-      });
+    setSavingQuickAddPos(true);
+    try {
+      let prodId = `quick_${Date.now()}`;
+      if (qaAddToInv) {
+        prodId = await saveProductToDb(uid, {
+          name: qaName.trim(),
+          variantName: qaVariant.trim(),
+          barcode: qaBarcode.trim(),
+          unit: qaUnit,
+          mrp: mrpVal,
+          retailPrice: retailVal,
+          quantity: qtyVal,
+          archived: false,
+        });
+      }
+      setCartItems((prev) => [
+        ...prev,
+        {
+          productId: prodId,
+          name: qaName.trim(),
+          variantName: qaVariant.trim(),
+          barcode: qaBarcode.trim(),
+          unit: qaUnit,
+          qty: qtyVal,
+          mrp: mrpVal,
+          retailPrice: retailVal,
+          purchasePrice: 0,
+          gst: 0,
+          cess: 0,
+          discount: Math.max(0, mrpVal - retailVal),
+        },
+      ]);
+      setQaName('');
+      setQaBarcode('');
+      setQaVariant('');
+      setQaMrp('0.00');
+      setQaRetail('0.00');
+      setQaQty('1');
+      setQuickAddOpen(false);
+      showToast('success', 'Product added to bill!');
+    } catch (err) {
+      console.error('POS Quick Add error:', err);
+      showToast('error', 'Failed to save product. Please try again.');
+    } finally {
+      setSavingQuickAddPos(false);
     }
-    setCartItems((prev) => [
-      ...prev,
-      {
-        productId: prodId,
-        name: qaName.trim(),
-        variantName: qaVariant.trim(),
-        barcode: qaBarcode.trim(),
-        unit: qaUnit,
-        qty: qtyVal,
-        mrp: mrpVal,
-        retailPrice: retailVal,
-        purchasePrice: 0,
-        gst: 0,
-        cess: 0,
-        discount: Math.max(0, mrpVal - retailVal),
-      },
-    ]);
-    setQaName('');
-    setQaBarcode('');
-    setQaVariant('');
-    setQaMrp('0.00');
-    setQaRetail('0.00');
-    setQaQty('1');
-    setQuickAddOpen(false);
   };
 
   const handleCompletePosOrReturn = async () => {
@@ -242,9 +266,17 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
       triggerEmptyCartToast();
       return;
     }
+    const cust = customers.find((c) => c.id === selectedCustomerId);
+    if (
+      mode !== 'create_return_pos' &&
+      profile.config?.billing?.customerNumberRequired &&
+      !cust?.phone
+    ) {
+      showToast('error', 'Customer number is required. Tap +Add Customer to select a customer.');
+      return;
+    }
     setSavingBill(true);
     try {
-      const cust = customers.find((c) => c.id === selectedCustomerId);
       const totalMrp = cartItems.reduce((acc, i) => acc + i.qty * (i.mrp || i.retailPrice), 0);
       const totalAmount = cartItems.reduce((acc, i) => acc + i.qty * i.retailPrice, 0);
       const discountAmount = Math.max(0, totalMrp - totalAmount);
@@ -271,6 +303,7 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
         );
         setCartItems([]);
         setMode('sale_returns_list');
+        showToast('success', 'Sale return recorded & stock updated!');
       } else {
         const nextInvNo = String(orders.length + 1);
         const orderPayload = {
@@ -293,11 +326,17 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
         const newId = await createOrderInDb(uid, orderPayload, products);
         setCreatedOrderModal({ id: newId, ownerId: uid, ...orderPayload });
         setCartItems([]);
+        showToast('success', `Invoice #${nextInvNo} saved!`);
       }
+    } catch (err) {
+      console.error('Complete order/return error:', err);
+      showToast('error', 'Failed to save transaction. Please try again.');
     } finally {
       setSavingBill(false);
     }
   };
+
+  let screenContent: React.ReactNode = null;
 
   // ============================================================================
   // 1. SMART CALCULATOR TAB (Matches 06:16 - 06:20)
@@ -428,12 +467,16 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
         setCalcQtyStr('');
         setCalcPriceStr('');
         setCalcDiscount(0);
+        showToast('success', `Invoice #${nextInvNo} created!`);
+      } catch (err) {
+        console.error('Calculator bill error:', err);
+        showToast('error', 'Could not create bill. Please try again.');
       } finally {
         setSavingBill(false);
       }
     };
 
-    return (
+    screenContent = (
       <div className="flex flex-col h-[calc(100vh-64px)] bg-[#FAF9F5] justify-between overflow-hidden">
         {/* Top Header */}
         <div className="p-3 bg-white border-b border-slate-200 flex items-stretch justify-between gap-2.5 max-w-md mx-auto w-full">
@@ -804,93 +847,10 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
           </div>
         )}
 
-        {/* Created Receipt Preview Modal */}
-        {createdOrderModal && (
-          <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-            <div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 shadow-2xl">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 text-emerald-600 font-extrabold text-sm">
-                  <CheckCircle2 className="w-5 h-5" />
-                  <span>Invoice #{createdOrderModal.invoiceNumber} Saved</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setCreatedOrderModal(null)}
-                  className="text-xs font-bold text-slate-400"
-                >
-                  Close
-                </button>
-              </div>
-
-              <div
-                id="pos-receipt-card"
-                className="border border-slate-300 rounded-xl p-4 bg-white text-slate-900 font-mono text-xs space-y-2"
-              >
-                <div className="text-center border-b border-dashed border-slate-400 pb-2">
-                  <p className="font-bold text-sm">{profile.shopName}</p>
-                  <p className="text-[10px]">{profile.phone}</p>
-                  <p className="text-[10px]">
-                    {createdOrderModal.dateStr} {createdOrderModal.timeStr} · INV #
-                    {createdOrderModal.invoiceNumber}
-                  </p>
-                </div>
-                <div className="space-y-1 border-b border-dashed border-slate-400 pb-2">
-                  {createdOrderModal.items.map((it, idx) => (
-                    <div key={idx} className="flex justify-between">
-                      <span>
-                        ({idx + 1}) {it.name} × {it.qty}
-                      </span>
-                      <span>₹{(it.qty * it.retailPrice).toFixed(1)}</span>
-                    </div>
-                  ))}
-                </div>
-                <div className="flex justify-between font-bold text-sm">
-                  <span>Total ({createdOrderModal.paymentMode})</span>
-                  <span>₹{createdOrderModal.totalAmount.toFixed(2)}</span>
-                </div>
-                <div className="flex flex-col items-center pt-2">
-                  <span className="text-[10px] mb-1">Scan QR to Pay Bill</span>
-                  <QRCodeSVG
-                    value={`upi://pay?pa=${profile.phone.replace(/[^0-9]/g, '')}@upi&pn=${encodeURIComponent(profile.shopName)}&am=${createdOrderModal.totalAmount}`}
-                    size={96}
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2.5">
-                <button
-                  type="button"
-                  onClick={() =>
-                    downloadElementAsPdf(
-                      'pos-receipt-card',
-                      `Invoice_${createdOrderModal.invoiceNumber}`
-                    )
-                  }
-                  className="bg-slate-100 text-[#0A2540] font-bold text-xs py-3 rounded-xl flex items-center justify-center gap-1.5"
-                >
-                  <Printer className="w-4 h-4" />
-                  <span>Download PDF</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setCreatedOrderModal(null)}
-                  className="bg-[#0A2540] text-white font-bold text-xs py-3 rounded-xl"
-                >
-                  Done
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
     );
-  }
-
-  // ============================================================================
-  // 2. E-WAY BILLS SCREEN (Matches 10:25)
-  // ============================================================================
-  if (mode === 'eway_bills') {
-    return (
+  } else if (mode === 'eway_bills') {
+    screenContent = (
       <div className="min-h-screen bg-[#FAF9F5] flex flex-col">
         <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3 sticky top-0 z-30">
           <button
@@ -912,13 +872,17 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
         </div>
       </div>
     );
-  }
-
-  // ============================================================================
-  // 3. SALE RETURNS LIST SCREEN (Matches 10:27 - 10:40)
-  // ============================================================================
-  if (mode === 'sale_returns_list') {
-    return (
+  } else if (mode === 'sale_returns_list') {
+    const filteredReturns = returns.filter((r) => {
+      if (!returnSearch.trim()) return true;
+      const q = returnSearch.toLowerCase();
+      return (
+        r.returnNumber.toLowerCase().includes(q) ||
+        (r.customerName || '').toLowerCase().includes(q) ||
+        String(r.totalAmount).includes(q)
+      );
+    });
+    screenContent = (
       <div className="min-h-screen bg-[#FAF9F5] flex flex-col pb-24">
         <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3 sticky top-0 z-30">
           <button
@@ -937,7 +901,7 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
             <div className="flex items-center gap-3">
               <span className="text-slate-600">📅</span>
               <div>
-                <p className="text-xs font-extrabold text-[#0A2540]">Today</p>
+                <p className="text-xs font-extrabold text-[#0A2540]">All Returns</p>
                 <p className="text-[11px] text-slate-400 tabular-nums">{orderDateFilter}</p>
               </div>
             </div>
@@ -949,12 +913,14 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
             <Search className="w-4 h-4 text-slate-400" />
             <input
               type="text"
+              value={returnSearch}
+              onChange={(e) => setReturnSearch(e.target.value)}
               placeholder="Search by ID, customer, or amount"
               className="flex-1 text-xs text-slate-800 outline-none"
             />
           </div>
 
-          {returns.length === 0 ? (
+          {filteredReturns.length === 0 ? (
             <div className="flex-1 flex flex-col items-center justify-center text-center py-20">
               <p className="text-xs font-semibold text-slate-700">No returns found.</p>
               <p className="text-xs text-slate-500 mt-0.5">
@@ -963,7 +929,7 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
             </div>
           ) : (
             <div className="space-y-2.5">
-              {returns.map((r) => (
+              {filteredReturns.map((r) => (
                 <div
                   key={r.id}
                   className="bg-white rounded-2xl border border-slate-200 p-4 flex items-center justify-between shadow-xs"
@@ -1159,6 +1125,19 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
                 <button
                   type="button"
                   onClick={() => {
+                    const clean = returnPhoneInput.trim().toLowerCase();
+                    const matchedCust = customers.find(
+                      (c) =>
+                        c.phone.toLowerCase().includes(clean) ||
+                        c.name.toLowerCase().includes(clean)
+                    );
+                    if (matchedCust) setSelectedCustomerId(matchedCust.id);
+                    const matchedOrder = orders.find(
+                      (o) =>
+                        (o.customerPhone && o.customerPhone.toLowerCase().includes(clean)) ||
+                        (o.customerName && o.customerName.toLowerCase().includes(clean))
+                    );
+                    if (matchedOrder) setCartItems(matchedOrder.items);
                     setReturnFromPhoneModal(false);
                     setMode('create_return_pos');
                   }}
@@ -1172,13 +1151,11 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
         )}
       </div>
     );
-  }
-
-  // ============================================================================
-  // 4. PAST ORDERS SCREEN (Matches 10:01 - 10:24)
-  // ============================================================================
-  if (mode === 'past_orders') {
+  } else if (mode === 'past_orders') {
     const filteredOrders = orders.filter((o) => {
+      if (filterByDate && orderDateFilter && o.dateStr !== orderDateFilter) {
+        return false;
+      }
       if (activeOrderChip !== 'All') {
         if (activeOrderChip === 'Not Paid' && o.paidAmount >= o.totalAmount) return false;
         if (
@@ -1198,18 +1175,22 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
       );
     });
 
-    const totalSalesVal = filteredOrders.reduce((acc, o) => acc + o.totalAmount, 0);
+    const totalSalesVal = filteredOrders.reduce((acc, o) => acc + (Number(o.totalAmount) || 0), 0);
     const toCollectVal = filteredOrders.reduce(
-      (acc, o) => acc + Math.max(0, o.totalAmount - o.paidAmount),
+      (acc, o) => acc + Math.max(0, (Number(o.totalAmount) || 0) - (Number(o.paidAmount) || 0)),
+      0
+    );
+    const pastCollectionVal = filteredOrders.reduce(
+      (acc, o) => acc + (Number(o.paidAmount) || 0),
       0
     );
 
     const sumByMode = (m: string) =>
       filteredOrders
         .filter((o) => o.paymentMode.toLowerCase() === m.toLowerCase())
-        .reduce((acc, o) => acc + o.totalAmount, 0);
+        .reduce((acc, o) => acc + (Number(o.totalAmount) || 0), 0);
 
-    return (
+    screenContent = (
       <div className="min-h-screen bg-[#FAF9F5] flex flex-col pb-28">
         <header className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center gap-3 sticky top-0 z-30">
           <button
@@ -1228,16 +1209,27 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
             <div className="flex items-center gap-3">
               <span className="text-slate-600">📅</span>
               <div>
-                <p className="text-xs font-extrabold text-[#0A2540]">Today</p>
+                <p className="text-xs font-extrabold text-[#0A2540]">
+                  {filterByDate ? 'Selected Date' : 'All Dates'}
+                </p>
                 <input
                   type="date"
                   value={orderDateFilter}
-                  onChange={(e) => setOrderDateFilter(e.target.value)}
+                  onChange={(e) => {
+                    setOrderDateFilter(e.target.value);
+                    setFilterByDate(true);
+                  }}
                   className="text-[11px] text-slate-500 outline-none bg-transparent tabular-nums"
                 />
               </div>
             </div>
-            <SlidersHorizontal className="w-4 h-4 text-slate-600" />
+            <button
+              type="button"
+              onClick={() => setFilterByDate((v) => !v)}
+              className="px-2.5 py-1 rounded-lg bg-slate-100 text-[11px] font-bold text-[#0A2540]"
+            >
+              {filterByDate ? 'Show All' : 'Filter Date'}
+            </button>
           </div>
 
           {/* Search Bar */}
@@ -1247,7 +1239,7 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
               type="text"
               value={orderSearch}
               onChange={(e) => setOrderSearch(e.target.value)}
-              placeholder="Search by amount, items, customer, o..."
+              placeholder="Search by amount, items, customer, or #"
               className="flex-1 text-xs text-slate-800 outline-none"
             />
           </div>
@@ -1283,7 +1275,9 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
                 <span className="w-7 h-7 rounded-lg bg-white/10 flex items-center justify-center text-xs">
                   💳
                 </span>
-                <h3 className="text-sm font-extrabold">Today Summary</h3>
+                <h3 className="text-sm font-extrabold">
+                  {filterByDate ? 'Date Summary' : 'Orders Summary'}
+                </h3>
               </div>
               <div className="bg-white/15 rounded-full px-3 py-1 text-xs font-bold flex items-center gap-1.5">
                 <span>{filteredOrders.length} orders</span>
@@ -1305,8 +1299,8 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
                 <p className="text-sm font-extrabold mt-0.5 tabular-nums">₹{toCollectVal}</p>
               </div>
               <div className="bg-white/10 border border-white/10 rounded-xl p-2.5 text-center">
-                <p className="text-[10px] text-slate-200">Past Collection</p>
-                <p className="text-sm font-extrabold mt-0.5 tabular-nums">₹0</p>
+                <p className="text-[10px] text-slate-200">Collection</p>
+                <p className="text-sm font-extrabold mt-0.5 tabular-nums">₹{pastCollectionVal}</p>
               </div>
             </div>
 
@@ -1336,46 +1330,53 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
 
           {/* Orders List Cards (Matches 10:01) */}
           <div className="space-y-3">
-            {filteredOrders.map((o) => (
-              <div
-                key={o.id}
-                className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs space-y-2.5"
-              >
-                <div className="flex items-start justify-between">
-                  <div>
-                    <h4 className="text-base font-extrabold text-[#0A2540]">
-                      #{o.invoiceNumber}
-                    </h4>
-                    <p className="text-[11px] text-slate-400">
-                      {o.dateStr} • {o.timeStr}
-                    </p>
-                  </div>
-                  <div className="text-right">
-                    <span className="inline-block border border-slate-300 rounded px-2 py-0.5 text-[10px] font-bold text-slate-600 uppercase">
-                      {o.paymentMode}
-                    </span>
-                    <p className="text-[10px] text-slate-400 mt-1">
-                      Last Action <span className="font-bold text-slate-700">{o.timeStr}</span>
-                    </p>
-                  </div>
-                </div>
-
-                <div className="bg-slate-50 rounded-xl p-3 flex items-center justify-between">
-                  <div>
-                    <p className="text-xs font-semibold text-slate-600">{o.itemCount} items</p>
-                    <p className="text-[11px] text-slate-500 mt-0.5">
-                      MRP: ₹{o.totalMrp} •{' '}
-                      <span className="text-red-500 font-semibold">
-                        Discount: ₹{o.discountAmount}
-                      </span>
-                    </p>
-                  </div>
-                  <span className="text-base font-extrabold text-emerald-600 tabular-nums">
-                    ₹{o.totalAmount}
-                  </span>
-                </div>
+            {filteredOrders.length === 0 ? (
+              <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center text-xs text-slate-400">
+                No orders found for the current filter.
               </div>
-            ))}
+            ) : (
+              filteredOrders.map((o) => (
+                <div
+                  key={o.id}
+                  onClick={() => setCreatedOrderModal(o)}
+                  className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs space-y-2.5 cursor-pointer hover:border-[#0A2540]"
+                >
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <h4 className="text-base font-extrabold text-[#0A2540]">
+                        #{o.invoiceNumber}
+                      </h4>
+                      <p className="text-[11px] text-slate-400">
+                        {o.dateStr} • {o.timeStr} {o.customerName ? `• ${o.customerName}` : ''}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <span className="inline-block border border-slate-300 rounded px-2 py-0.5 text-[10px] font-bold text-slate-600 uppercase">
+                        {o.paymentMode}
+                      </span>
+                      <p className="text-[10px] text-[#1565c0] font-bold mt-1">
+                        Tap for Receipt / PDF
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="bg-slate-50 rounded-xl p-3 flex items-center justify-between">
+                    <div>
+                      <p className="text-xs font-semibold text-slate-600">{o.itemCount} items</p>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        MRP: ₹{o.totalMrp} •{' '}
+                        <span className="text-red-500 font-semibold">
+                          Discount: ₹{o.discountAmount}
+                        </span>
+                      </p>
+                    </div>
+                    <span className="text-base font-extrabold text-emerald-600 tabular-nums">
+                      ₹{o.totalAmount}
+                    </span>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         </div>
 
@@ -1401,15 +1402,11 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
         </div>
       </div>
     );
-  }
+  } else {
+    const totalBillAmt = cartItems.reduce((acc, i) => acc + i.qty * i.retailPrice, 0);
+    const totalCartQty = cartItems.reduce((acc, i) => acc + i.qty, 0);
 
-  // ============================================================================
-  // 5. NEW BILL / POS SCREEN & CREATE RETURN POS (Matches 10:41 - 11:15)
-  // ============================================================================
-  const totalBillAmt = cartItems.reduce((acc, i) => acc + i.qty * i.retailPrice, 0);
-  const totalCartQty = cartItems.reduce((acc, i) => acc + i.qty, 0);
-
-  return (
+    screenContent = (
     <div className="min-h-screen bg-[#FAF9F5] flex flex-col justify-between">
       {/* Top Bar */}
       <div className="bg-white border-b border-slate-200 p-3 sticky top-0 z-20">
@@ -1768,6 +1765,7 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
               </div>
               <button
                 type="button"
+                onClick={() => setQaVariant((v) => v || 'Standard')}
                 className="bg-[#0e5a7a] text-white text-xs font-bold px-3.5 py-2 rounded-xl"
               >
                 Variant of?
@@ -1899,10 +1897,11 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
               </button>
               <button
                 type="button"
+                disabled={savingQuickAddPos}
                 onClick={handleSaveQuickAddPos}
-                className="py-3 rounded-xl bg-[#0A2540] text-white font-bold text-sm"
+                className="py-3 rounded-xl bg-[#0A2540] text-white font-bold text-sm disabled:opacity-60"
               >
-                Add Product
+                {savingQuickAddPos ? 'Saving...' : 'Add Product'}
               </button>
             </div>
           </div>
@@ -1962,5 +1961,113 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
         }}
       />
     </div>
+    );
+  }
+
+  return (
+    <>
+      {screenContent}
+
+      {/* Global Toast */}
+      {toast && (
+        <div
+          className={`fixed top-16 left-1/2 -translate-x-1/2 z-[70] w-[90%] max-w-sm rounded-2xl px-4 py-3 shadow-xl flex items-center gap-2.5 text-xs font-bold text-white ${
+            toast.type === 'error' ? 'bg-red-600' : 'bg-emerald-600'
+          }`}
+        >
+          {toast.type === 'error' ? (
+            <AlertCircle className="w-4 h-4 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+          )}
+          <span className="flex-1">{toast.msg}</span>
+          <button type="button" onClick={() => setToast(null)}>
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Global Created / Past Invoice Receipt Preview Modal */}
+      {createdOrderModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-emerald-600 font-extrabold text-sm">
+                <CheckCircle2 className="w-5 h-5" />
+                <span>Invoice #{createdOrderModal.invoiceNumber}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCreatedOrderModal(null)}
+                className="text-xs font-bold text-slate-400"
+              >
+                Close
+              </button>
+            </div>
+
+            <div
+              id="pos-receipt-card"
+              className="border border-slate-300 rounded-xl p-4 bg-white text-slate-900 font-mono text-xs space-y-2"
+            >
+              <div className="text-center border-b border-dashed border-slate-400 pb-2">
+                <p className="font-bold text-sm">{profile.shopName}</p>
+                <p className="text-[10px]">{profile.phone}</p>
+                {createdOrderModal.customerName && (
+                  <p className="text-[10px]">Customer: {createdOrderModal.customerName}</p>
+                )}
+                <p className="text-[10px]">
+                  {createdOrderModal.dateStr} {createdOrderModal.timeStr} · INV #
+                  {createdOrderModal.invoiceNumber}
+                </p>
+              </div>
+              <div className="space-y-1 border-b border-dashed border-slate-400 pb-2">
+                {createdOrderModal.items.map((it, idx) => (
+                  <div key={idx} className="flex justify-between">
+                    <span>
+                      ({idx + 1}) {it.name} × {it.qty}
+                    </span>
+                    <span>₹{(it.qty * it.retailPrice).toFixed(1)}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="flex justify-between font-bold text-sm">
+                <span>Total ({createdOrderModal.paymentMode})</span>
+                <span>₹{createdOrderModal.totalAmount.toFixed(2)}</span>
+              </div>
+              <div className="flex flex-col items-center pt-2">
+                <span className="text-[10px] mb-1">Scan QR to Pay Bill</span>
+                <QRCodeSVG
+                  value={`upi://pay?pa=${(profile.phone || '0000000000').replace(/[^0-9]/g, '')}@upi&pn=${encodeURIComponent(profile.shopName || 'SmartBill CM')}&am=${createdOrderModal.totalAmount}`}
+                  size={96}
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2.5">
+              <button
+                type="button"
+                onClick={() =>
+                  downloadElementAsPdf(
+                    'pos-receipt-card',
+                    `Invoice_${createdOrderModal.invoiceNumber}`
+                  )
+                }
+                className="bg-slate-100 text-[#0A2540] font-bold text-xs py-3 rounded-xl flex items-center justify-center gap-1.5"
+              >
+                <Printer className="w-4 h-4" />
+                <span>Download PDF</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setCreatedOrderModal(null)}
+                className="bg-[#0A2540] text-white font-bold text-xs py-3 rounded-xl"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 };
