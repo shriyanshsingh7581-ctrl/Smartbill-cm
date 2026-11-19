@@ -28,6 +28,9 @@ export default defineConfig(() => {
         },
       },
     ],
+    optimizeDeps: {
+      exclude: ['zxing-wasm'],
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

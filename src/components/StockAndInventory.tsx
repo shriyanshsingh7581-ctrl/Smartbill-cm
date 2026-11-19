@@ -971,16 +971,13 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
                       setQuickAddOpen(true);
                     }
                   },
-                  { scanMode: 'bill_items', title: 'AI Bill, Barcode & IMEI Scan' }
+                  { scanMode: 'barcode_or_imei', title: 'Barcode & IMEI Scanner' }
                 )
               }
-              className="relative bg-gradient-to-r from-purple-600 to-indigo-500 text-white text-xs font-bold px-3.5 py-2 rounded-full flex items-center gap-1.5 shadow-md"
+              className="relative bg-gradient-to-r from-[#0A2540] to-[#134e6f] text-white text-xs font-bold px-3.5 py-2 rounded-full flex items-center gap-1.5 shadow-md"
             >
-              <span className="absolute -top-2 -left-1 bg-amber-300 text-slate-900 text-[8px] font-extrabold px-1.5 py-0.2 rounded">
-                New
-              </span>
               <ScanLine className="w-3.5 h-3.5" />
-              <span>AI SCAN</span>
+              <span>SCAN IMEI / BARCODE</span>
             </button>
 
             <button

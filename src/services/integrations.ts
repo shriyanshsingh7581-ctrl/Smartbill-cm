@@ -3,6 +3,12 @@ import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import {
+  prepareZXingModule,
+  readBarcodes,
+  type ReaderOptions,
+} from 'zxing-wasm/reader';
+import zxingWasmUrl from 'zxing-wasm/reader/zxing_reader.wasm?url';
+import {
   BarcodeFormat,
   BinaryBitmap,
   DecodeHintType,
@@ -12,6 +18,111 @@ import {
   RGBLuminanceSource,
 } from '@zxing/library';
 import type { ProductDoc, OrderDoc, ExpenseDoc } from '../firebase';
+
+let zxingWasmConfigured = false;
+let zxingWasmReadyPromise: Promise<boolean> | null = null;
+
+export function warmupZxingWasm(): Promise<boolean> {
+  if (!zxingWasmConfigured) {
+    zxingWasmConfigured = true;
+    try {
+      prepareZXingModule({
+        overrides: {
+          locateFile: (path: string, prefix: string) =>
+            path.endsWith('.wasm') ? zxingWasmUrl : prefix + path,
+        },
+      });
+    } catch {
+      // ignore configuration errors
+    }
+  }
+  if (!zxingWasmReadyPromise) {
+    zxingWasmReadyPromise = Promise.resolve(
+      prepareZXingModule({
+        overrides: {
+          locateFile: (path: string, prefix: string) =>
+            path.endsWith('.wasm') ? zxingWasmUrl : prefix + path,
+        },
+        fireImmediately: true,
+      })
+    )
+      .then(() => true)
+      .catch(() => false);
+  }
+  return zxingWasmReadyPromise;
+}
+
+const ZXING_WASM_LIVE_OPTIONS: ReaderOptions = {
+  tryHarder: true,
+  tryRotate: true,
+  tryInvert: true,
+  tryDownscale: true,
+  minLineCount: 2,
+  maxNumberOfSymbols: 5,
+  binarizer: 'LocalAverage',
+};
+
+export interface WasmDecodedSymbol {
+  text: string;
+  format: string;
+  centerDist: number;
+}
+
+export async function decodeImageDataWithZxingWasm(
+  imageData: ImageData
+): Promise<WasmDecodedSymbol[]> {
+  try {
+    const ready = await warmupZxingWasm();
+    if (!ready) return [];
+    const results = await readBarcodes(imageData, ZXING_WASM_LIVE_OPTIONS);
+    if (!results || results.length === 0) return [];
+
+    const midX = imageData.width / 2;
+    const midY = imageData.height / 2;
+    const seen = new Set<string>();
+    const out: WasmDecodedSymbol[] = [];
+
+    for (const r of results) {
+      if (!r.isValid || !r.text) continue;
+      const text = normalizeScannedCode(r.text);
+      if (!text || text.length < 3 || seen.has(text)) continue;
+      seen.add(text);
+
+      // Compute distance from center laser line so aiming at IMEI 1 vs IMEI 2 picks the exact aimed code
+      let centerDist = 999999;
+      if (r.position) {
+        const cx =
+          (r.position.topLeft.x +
+            r.position.topRight.x +
+            r.position.bottomLeft.x +
+            r.position.bottomRight.x) /
+          4;
+        const cy =
+          (r.position.topLeft.y +
+            r.position.topRight.y +
+            r.position.bottomLeft.y +
+            r.position.bottomRight.y) /
+          4;
+        centerDist = Math.hypot(cx - midX, (cy - midY) * 1.6);
+      }
+      out.push({ text, format: String(r.format || ''), centerDist });
+    }
+
+    // Sort by closest to laser center first; tie-break valid 15-digit IMEI higher
+    out.sort((a, b) => {
+      if (Math.abs(a.centerDist - b.centerDist) > 35) {
+        return a.centerDist - b.centerDist;
+      }
+      const score = (c: string) =>
+        /^\d{15}$/.test(c) && isValidImeiLuhn(c) ? 3 : /^\d{15}$/.test(c) ? 2 : 1;
+      return score(b.text) - score(a.text);
+    });
+
+    return out;
+  } catch {
+    return [];
+  }
+}
 
 export interface ScannedBillItem {
   name: string;
@@ -549,10 +660,39 @@ async function loadImageFileToCanvas(file: File, maxDim = 1400): Promise<HTMLCan
   });
 }
 
-// 2A. Step A: Multi-Pass Local Barcode & IMEI Decode (Native BarcodeDetector + ZXing + Html5Qrcode)
+// 2A. Multi-Pass Pure-Local Barcode & IMEI Decode (ZXing-C++ WASM + Native BarcodeDetector + JS ZXing + Html5Qrcode)
 export async function decodeBarcodesFromImageFile(file: File): Promise<LocalDecodeResult> {
   const collected = new Set<string>();
-  const canvas = await loadImageFileToCanvas(file, 1400);
+
+  // 0. ZXing-C++ WebAssembly directly on image file (fastest & highest accuracy for 1D Code-128 IMEI / EAN / UPC)
+  try {
+    const ready = await warmupZxingWasm();
+    if (ready) {
+      const wasmResults = await readBarcodes(file, ZXING_WASM_LIVE_OPTIONS);
+      for (const r of wasmResults || []) {
+        if (r.isValid && r.text) {
+          const val = normalizeScannedCode(r.text);
+          if (val) collected.add(val);
+        }
+      }
+    }
+  } catch {
+    // Continue to canvas + native fallback
+  }
+
+  const canvas = await loadImageFileToCanvas(file, 1600);
+  if (canvas && collected.size === 0) {
+    try {
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (ctx) {
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const wasmSymbols = await decodeImageDataWithZxingWasm(imgData);
+        for (const s of wasmSymbols) collected.add(s.text);
+      }
+    } catch {
+      // ignore
+    }
+  }
 
   // 1. Native BarcodeDetector on full frame + center crop + 90° rotated frame
   try {
