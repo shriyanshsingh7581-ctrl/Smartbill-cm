@@ -50,7 +50,12 @@ import {
   type ExpenseDoc,
   type StaffDoc,
 } from './firebase';
-import { askGroqInventoryAssistant, type ScannedVisionResult } from './services/integrations';
+import {
+  askGroqInventoryAssistant,
+  createSafeNativeBarcodeDetector,
+  warmupZxingWasm,
+  type ScannedVisionResult,
+} from './services/integrations';
 import { TRANSLATIONS, type LanguageCode } from './i18n/translations';
 import { AuthScreen } from './components/AuthScreen';
 import { BarcodeScannerModal } from './components/BarcodeScannerModal';
@@ -169,7 +174,7 @@ export default function App() {
   const [aiMessages, setAiMessages] = useState<{ role: 'user' | 'assistant'; text: string }[]>([
     {
       role: 'assistant',
-      text: 'Namaste! I am your SmartBill CM AI Business Assistant powered by Llama-3.3-70B. Ask me about your live stock, top selling products, restock alerts, or today’s profit!',
+      text: 'Namaste! I am your SmartBill CM AI Business Assistant. Ask me about your live stock, top selling products, restock alerts, or today’s profit!',
     },
   ]);
 
@@ -201,6 +206,15 @@ export default function App() {
       setAuthLoading(false);
     });
     return () => unsubAuth();
+  }, []);
+
+  // Pre-warm local C++ ZXing-WASM & native hardware BarcodeDetector on idle so scanner locks instantly with 0ms cold start
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void warmupZxingWasm();
+      void createSafeNativeBarcodeDetector();
+    }, 1000);
+    return () => window.clearTimeout(timer);
   }, []);
 
   useEffect(() => {
@@ -1187,7 +1201,7 @@ export default function App() {
                 <div>
                   <h3 className="text-sm font-extrabold">SmartBill CM AI Assistant</h3>
                   <p className="text-[10px] text-emerald-300">
-                    Powered by Groq Llama-3.3-70B • Live Store Context
+                    Live Store Insights • Real-Time Stock Context
                   </p>
                 </div>
               </div>

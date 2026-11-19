@@ -18,6 +18,8 @@ import {
   UserPlus,
   Mic,
   X,
+  Smartphone,
+  Check,
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
@@ -163,6 +165,12 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
   const [filterByDate, setFilterByDate] = useState(false);
   const [savingQuickAddPos, setSavingQuickAddPos] = useState(false);
   const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+  const [imeiPickerModal, setImeiPickerModal] = useState<{
+    product: ProductDoc;
+    cartIdx?: number;
+    selectedImeis: string[];
+    search: string;
+  } | null>(null);
 
   const showToast = (type: 'success' | 'error', msg: string) => {
     setToast({ type, msg });
@@ -174,9 +182,99 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
     setTimeout(() => setEmptyCartToast(false), 2600);
   };
 
-  const addProductToCart = (p: ProductDoc) => {
+  const getProductAllImeis = (p: ProductDoc): string[] => {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    const push = (val?: string) => {
+      const clean = (val || '').trim();
+      if (clean && !seen.has(clean.toLowerCase())) {
+        seen.add(clean.toLowerCase());
+        out.push(clean);
+      }
+    };
+    if (Array.isArray(p.imeis)) p.imeis.forEach(push);
+    if (Array.isArray(p.variants)) {
+      p.variants.forEach((v) => {
+        if (Array.isArray(v.imeis)) v.imeis.forEach(push);
+      });
+    }
+    return out;
+  };
+
+  const getMatchedImeiForQuery = (p: ProductDoc, query: string): string | null => {
+    const q = query.trim().toLowerCase();
+    if (!q || q.length < 3) return null;
+    const all = getProductAllImeis(p);
+    return all.find((im) => im.toLowerCase().includes(q)) || null;
+  };
+
+  const addProductToCart = (p: ProductDoc, specificImei?: string) => {
     const unitPrice =
       priceMode === 'Wholesale' && p.wholesalePrice > 0 ? p.wholesalePrice : p.retailPrice;
+    const allImeis = getProductAllImeis(p);
+    const cleanSpecific = specificImei?.trim();
+
+    if (cleanSpecific) {
+      const alreadyInCart = cartItems.some((item) =>
+        item.soldImeis?.some((im) => im.toLowerCase() === cleanSpecific.toLowerCase())
+      );
+      if (alreadyInCart) {
+        showToast('error', `IMEI ${cleanSpecific} is already in this bill`);
+        return;
+      }
+      setCartItems((prev) => {
+        const existingIdx = prev.findIndex((i) => i.productId === p.id);
+        if (existingIdx > -1) {
+          return prev.map((item, idx) => {
+            if (idx !== existingIdx) return item;
+            const nextImeis = [...(item.soldImeis || []), cleanSpecific];
+            return {
+              ...item,
+              soldImeis: nextImeis,
+              qty: Math.max(item.qty + 1, nextImeis.length),
+            };
+          });
+        }
+        return [
+          ...prev,
+          {
+            productId: p.id,
+            name: p.name,
+            variantName: p.variantName,
+            barcode: p.barcode,
+            unit: p.unit || 'Piece',
+            qty: 1,
+            mrp: p.mrp || unitPrice,
+            retailPrice: unitPrice,
+            purchasePrice: p.purchasePrice || 0,
+            gst: p.gst || 0,
+            cess: p.cess || 0,
+            hsn: p.hsn || '',
+            discount: Math.max(0, (p.mrp || unitPrice) - unitPrice),
+            soldImeis: [cleanSpecific],
+          },
+        ];
+      });
+      return;
+    }
+
+    // If selling a multi-IMEI product without scanning a specific IMEI, prompt exact IMEI picker
+    if (mode !== 'create_return_pos' && allImeis.length > 0) {
+      const existingIdx = cartItems.findIndex((i) => i.productId === p.id);
+      if (allImeis.length === 1 && existingIdx === -1) {
+        addProductToCart(p, allImeis[0]);
+        return;
+      }
+      const existingSelected = existingIdx > -1 ? cartItems[existingIdx].soldImeis || [] : [];
+      setImeiPickerModal({
+        product: p,
+        cartIdx: existingIdx > -1 ? existingIdx : undefined,
+        selectedImeis: [...existingSelected],
+        search: '',
+      });
+      return;
+    }
+
     setCartItems((prev) => {
       const existingIdx = prev.findIndex((i) => i.productId === p.id);
       if (existingIdx > -1) {
@@ -203,6 +301,54 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
         },
       ];
     });
+  };
+
+  const handleConfirmImeiPicker = () => {
+    if (!imeiPickerModal) return;
+    const { product: p, cartIdx, selectedImeis } = imeiPickerModal;
+    if (selectedImeis.length === 0) {
+      showToast('error', 'Select or scan at least 1 IMEI to sell');
+      return;
+    }
+    const unitPrice =
+      priceMode === 'Wholesale' && p.wholesalePrice > 0 ? p.wholesalePrice : p.retailPrice;
+
+    setCartItems((prev) => {
+      const targetIdx =
+        cartIdx !== undefined ? cartIdx : prev.findIndex((i) => i.productId === p.id);
+      if (targetIdx > -1) {
+        return prev.map((item, idx) =>
+          idx === targetIdx
+            ? {
+                ...item,
+                soldImeis: selectedImeis,
+                qty: selectedImeis.length,
+              }
+            : item
+        );
+      }
+      return [
+        ...prev,
+        {
+          productId: p.id,
+          name: p.name,
+          variantName: p.variantName,
+          barcode: p.barcode,
+          unit: p.unit || 'Piece',
+          qty: selectedImeis.length,
+          mrp: p.mrp || unitPrice,
+          retailPrice: unitPrice,
+          purchasePrice: p.purchasePrice || 0,
+          gst: p.gst || 0,
+          cess: p.cess || 0,
+          hsn: p.hsn || '',
+          discount: Math.max(0, (p.mrp || unitPrice) - unitPrice),
+          soldImeis: selectedImeis,
+        },
+      ];
+    });
+    setImeiPickerModal(null);
+    showToast('success', `${p.name} (${selectedImeis.length} IMEI selected)`);
   };
 
   const handleSaveQuickAddPos = async () => {
@@ -274,6 +420,26 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
     ) {
       showToast('error', 'Customer number is required. Tap +Add Customer to select a customer.');
       return;
+    }
+    // Enforce exact IMEI selection when selling multi-IMEI serialized products
+    if (mode !== 'create_return_pos') {
+      for (let i = 0; i < cartItems.length; i++) {
+        const item = cartItems[i];
+        const linked = products.find((p) => p.id === item.productId);
+        if (linked) {
+          const stockImeis = getProductAllImeis(linked);
+          if (stockImeis.length > 0 && (item.soldImeis?.length || 0) < item.qty) {
+            setImeiPickerModal({
+              product: linked,
+              cartIdx: i,
+              selectedImeis: [...(item.soldImeis || [])],
+              search: '',
+            });
+            showToast('error', `Select ${item.qty} IMEI(s) for ${linked.name}`);
+            return;
+          }
+        }
+      }
     }
     setSavingBill(true);
     try {
@@ -1171,7 +1337,14 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
       return (
         o.invoiceNumber.toLowerCase().includes(q) ||
         o.customerName.toLowerCase().includes(q) ||
-        String(o.totalAmount).includes(q)
+        String(o.totalAmount).includes(q) ||
+        Boolean(
+          o.items?.some(
+            (it) =>
+              it.name.toLowerCase().includes(q) ||
+              Boolean(it.soldImeis?.some((im) => im.toLowerCase().includes(q)))
+          )
+        )
       );
     });
 
@@ -1514,56 +1687,144 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
 
       {/* Center Cart Items */}
       <div className="flex-1 max-w-md mx-auto w-full p-4 space-y-2.5">
-        {cartItems.map((it, idx) => (
-          <div
-            key={`${it.productId}_${idx}`}
-            className="bg-white rounded-2xl border border-slate-200 p-3.5 flex items-center justify-between shadow-xs"
-          >
-            <div>
-              <h4 className="text-sm font-extrabold text-[#0A2540]">{it.name}</h4>
-              <p className="text-xs text-slate-500">
-                ₹{it.retailPrice} × {it.qty} {it.unit}
-              </p>
+        {cartItems.map((it, idx) => {
+          const linkedProduct = products.find((p) => p.id === it.productId);
+          const stockImeis = linkedProduct ? getProductAllImeis(linkedProduct) : [];
+          return (
+            <div
+              key={`${it.productId}_${idx}`}
+              className="bg-white rounded-2xl border border-slate-200 p-3.5 shadow-xs space-y-2"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <h4 className="text-sm font-extrabold text-[#0A2540] truncate">{it.name}</h4>
+                  <p className="text-xs text-slate-500">
+                    ₹{it.retailPrice} × {it.qty} {it.unit}
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setCartItems((prev) =>
+                        prev
+                          .map((item, i) => {
+                            if (i !== idx) return item;
+                            const nextQty = item.qty - 1;
+                            const nextSold = item.soldImeis
+                              ? item.soldImeis.slice(0, Math.max(0, nextQty))
+                              : undefined;
+                            return { ...item, qty: nextQty, soldImeis: nextSold };
+                          })
+                          .filter((item) => item.qty > 0)
+                      )
+                    }
+                    className="w-7 h-7 rounded-lg bg-slate-100 font-bold text-sm"
+                  >
+                    -
+                  </button>
+                  <span className="text-xs font-extrabold w-5 text-center tabular-nums">
+                    {it.qty}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (mode !== 'create_return_pos' && linkedProduct && stockImeis.length > 0) {
+                        setImeiPickerModal({
+                          product: linkedProduct,
+                          cartIdx: idx,
+                          selectedImeis: [...(it.soldImeis || [])],
+                          search: '',
+                        });
+                        return;
+                      }
+                      setCartItems((prev) =>
+                        prev.map((item, i) => (i === idx ? { ...item, qty: item.qty + 1 } : item))
+                      );
+                    }}
+                    className="w-7 h-7 rounded-lg bg-slate-100 font-bold text-sm"
+                  >
+                    +
+                  </button>
+                  <span className="text-sm font-extrabold text-[#0A2540] ml-1.5 tabular-nums">
+                    ₹{it.qty * it.retailPrice}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setCartItems((prev) => prev.filter((_, i) => i !== idx))}
+                    className="text-red-500 p-1"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Linked Sold IMEI Chips & Picker Trigger */}
+              {((it.soldImeis && it.soldImeis.length > 0) ||
+                (mode !== 'create_return_pos' && stockImeis.length > 0)) && (
+                <div className="pt-2 border-t border-slate-100 space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10.5px] font-bold text-slate-500 flex items-center gap-1">
+                      <Smartphone className="w-3 h-3 text-teal-600" />
+                      <span>
+                        Sold IMEI ({it.soldImeis?.length || 0}/{it.qty})
+                      </span>
+                    </span>
+                    {linkedProduct && stockImeis.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setImeiPickerModal({
+                            product: linkedProduct,
+                            cartIdx: idx,
+                            selectedImeis: [...(it.soldImeis || [])],
+                            search: '',
+                          })
+                        }
+                        className="text-[10.5px] font-extrabold text-[#1565c0] bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-lg"
+                      >
+                        Pick / Scan IMEI
+                      </button>
+                    )}
+                  </div>
+                  {it.soldImeis && it.soldImeis.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {it.soldImeis.map((im) => (
+                        <span
+                          key={im}
+                          className="inline-flex items-center gap-1 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-md px-2 py-0.5 text-[10.5px] font-mono font-bold"
+                        >
+                          <span>{im}</span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setCartItems((prev) =>
+                                prev
+                                  .map((item, i) => {
+                                    if (i !== idx) return item;
+                                    const remaining = (item.soldImeis || []).filter((x) => x !== im);
+                                    return {
+                                      ...item,
+                                      soldImeis: remaining,
+                                      qty: remaining.length,
+                                    };
+                                  })
+                                  .filter((item) => item.qty > 0)
+                              )
+                            }
+                            className="text-emerald-700 hover:text-rose-600"
+                          >
+                            <X className="w-2.5 h-2.5" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() =>
-                  setCartItems((prev) =>
-                    prev
-                      .map((item, i) => (i === idx ? { ...item, qty: item.qty - 1 } : item))
-                      .filter((item) => item.qty > 0)
-                  )
-                }
-                className="w-7 h-7 rounded-lg bg-slate-100 font-bold text-sm"
-              >
-                -
-              </button>
-              <span className="text-xs font-extrabold w-5 text-center tabular-nums">{it.qty}</span>
-              <button
-                type="button"
-                onClick={() =>
-                  setCartItems((prev) =>
-                    prev.map((item, i) => (i === idx ? { ...item, qty: item.qty + 1 } : item))
-                  )
-                }
-                className="w-7 h-7 rounded-lg bg-slate-100 font-bold text-sm"
-              >
-                +
-              </button>
-              <span className="text-sm font-extrabold text-[#0A2540] ml-2 tabular-nums">
-                ₹{it.qty * it.retailPrice}
-              </span>
-              <button
-                type="button"
-                onClick={() => setCartItems((prev) => prev.filter((_, i) => i !== idx))}
-                className="text-red-500 p-1"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Empty Cart Toast (Matches 10:45) */}
@@ -1649,13 +1910,28 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
                     if (!t) return false;
                     return (
                       (p.barcode && p.barcode.trim().toLowerCase() === t) ||
-                      Boolean(p.variants?.some((v) => v.barcode && v.barcode.trim().toLowerCase() === t))
+                      Boolean(p.imeis?.some((im) => im.trim().toLowerCase() === t)) ||
+                      Boolean(
+                        p.variants?.some(
+                          (v) =>
+                            (v.barcode && v.barcode.trim().toLowerCase() === t) ||
+                            Boolean(v.imeis?.some((im) => im.trim().toLowerCase() === t))
+                        )
+                      )
                     );
                   };
                   const matched = products.find((p) => matchesCode(p, cleanCode));
                   if (matched) {
-                    addProductToCart(matched);
-                    showToast('success', `Added ${matched.name}`);
+                    const exactImei = getProductAllImeis(matched).find(
+                      (im) => im.trim().toLowerCase() === cleanCode
+                    );
+                    addProductToCart(matched, exactImei);
+                    showToast(
+                      'success',
+                      exactImei
+                        ? `Added ${matched.name} (IMEI: ${exactImei})`
+                        : `Added ${matched.name}`
+                    );
                   } else if (visionResult?.items && visionResult.items.length > 0) {
                     const newCartItems: OrderLineItem[] = visionResult.items.map((it, idx) => {
                       const itemCode = it.imei || it.barcode || '';
@@ -1741,26 +2017,55 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
                 return (
                   p.name.toLowerCase().includes(q) ||
                   (p.barcode && p.barcode.toLowerCase().includes(q)) ||
-                  Boolean(p.variants?.some((v) => v.barcode && v.barcode.toLowerCase().includes(q)))
+                  Boolean(p.imeis?.some((im) => im.toLowerCase().includes(q))) ||
+                  Boolean(
+                    p.variants?.some(
+                      (v) =>
+                        (v.barcode && v.barcode.toLowerCase().includes(q)) ||
+                        Boolean(v.imeis?.some((im) => im.toLowerCase().includes(q)))
+                    )
+                  )
                 );
               })
-              .map((p) => (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => {
-                    addProductToCart(p);
-                    setSearchFocused(false);
-                  }}
-                  className="w-full text-left p-3 rounded-xl border border-slate-200 hover:bg-slate-50 flex items-center justify-between"
-                >
-                  <div>
-                    <p className="text-xs font-bold text-[#0A2540]">{p.name}</p>
-                    <p className="text-[11px] text-slate-400">Stock: {p.quantity} {p.unit}</p>
-                  </div>
-                  <span className="text-xs font-extrabold text-emerald-700">₹{p.retailPrice}</span>
-                </button>
-              ))}
+              .map((p) => {
+                const matchedImei = getMatchedImeiForQuery(p, posSearch);
+                const allImeis = getProductAllImeis(p);
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => {
+                      setSearchFocused(false);
+                      addProductToCart(p, matchedImei || undefined);
+                      if (matchedImei) {
+                        showToast('success', `Added ${p.name} (IMEI: ${matchedImei})`);
+                      }
+                    }}
+                    className={`w-full text-left p-3 rounded-xl border hover:bg-slate-50 flex items-center justify-between gap-2 ${
+                      matchedImei
+                        ? 'border-emerald-400 bg-emerald-50/40 ring-1 ring-emerald-200'
+                        : 'border-slate-200'
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-[#0A2540] truncate">{p.name}</p>
+                      <p className="text-[11px] text-slate-400">
+                        Stock: {p.quantity} {p.unit}
+                        {allImeis.length > 0 ? ` · ${allImeis.length} IMEIs` : ''}
+                      </p>
+                      {matchedImei && (
+                        <span className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 text-[10px] font-mono font-extrabold">
+                          <CheckCircle2 className="w-3 h-3 shrink-0" />
+                          <span>Matched IMEI: {matchedImei}</span>
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-xs font-extrabold text-emerald-700 shrink-0">
+                      ₹{p.retailPrice}
+                    </span>
+                  </button>
+                );
+              })}
           </div>
         </div>
       )}
@@ -2044,13 +2349,20 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
                   {createdOrderModal.invoiceNumber}
                 </p>
               </div>
-              <div className="space-y-1 border-b border-dashed border-slate-400 pb-2">
+              <div className="space-y-1.5 border-b border-dashed border-slate-400 pb-2">
                 {createdOrderModal.items.map((it, idx) => (
-                  <div key={idx} className="flex justify-between">
-                    <span>
-                      ({idx + 1}) {it.name} × {it.qty}
-                    </span>
-                    <span>₹{(it.qty * it.retailPrice).toFixed(1)}</span>
+                  <div key={idx} className="space-y-0.5">
+                    <div className="flex justify-between">
+                      <span>
+                        ({idx + 1}) {it.name} × {it.qty}
+                      </span>
+                      <span>₹{(it.qty * it.retailPrice).toFixed(1)}</span>
+                    </div>
+                    {it.soldImeis && it.soldImeis.length > 0 && (
+                      <div className="pl-3 text-[10px] text-slate-700 font-bold break-all">
+                        IMEI: {it.soldImeis.join(', ')}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -2087,6 +2399,138 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
                 className="bg-[#0A2540] text-white font-bold text-xs py-3 rounded-xl"
               >
                 Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* POS Sold IMEI Selection & Live Scan Modal */}
+      {imeiPickerModal && (
+        <div className="fixed inset-0 z-[75] bg-black/65 flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl max-h-[86vh] flex flex-col overflow-hidden shadow-2xl">
+            <div className="bg-[#0A2540] text-white px-4 py-3.5 flex items-center justify-between shrink-0">
+              <div className="min-w-0">
+                <h3 className="text-sm font-extrabold truncate">
+                  Select Sold IMEI — {imeiPickerModal.product.name}
+                </h3>
+                <p className="text-[11px] text-teal-200">
+                  {imeiPickerModal.selectedImeis.length} selected ·{' '}
+                  {getProductAllImeis(imeiPickerModal.product).length} in stock
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setImeiPickerModal(null)}
+                className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-4 space-y-3 overflow-y-auto flex-1">
+              {/* Search or Scan Box IMEI */}
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={imeiPickerModal.search}
+                  onChange={(e) =>
+                    setImeiPickerModal((prev) =>
+                      prev ? { ...prev, search: e.target.value } : null
+                    )
+                  }
+                  placeholder="Type last 4–6 digits or full IMEI..."
+                  className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-mono outline-none focus:border-[#0A2540]"
+                />
+                <button
+                  type="button"
+                  onClick={() =>
+                    onOpenScanner(
+                      (code) => {
+                        const clean = code.trim().toLowerCase();
+                        const all = getProductAllImeis(imeiPickerModal.product);
+                        const found = all.find((im) => im.toLowerCase() === clean);
+                        if (!found) {
+                          showToast('error', `IMEI ${code} is not linked to ${imeiPickerModal.product.name}`);
+                          return;
+                        }
+                        setImeiPickerModal((prev) => {
+                          if (!prev) return null;
+                          if (prev.selectedImeis.includes(found)) return prev;
+                          return { ...prev, selectedImeis: [...prev.selectedImeis, found] };
+                        });
+                        showToast('success', `Selected IMEI: ${found}`);
+                      },
+                      { scanMode: 'barcode_or_imei', title: 'Scan Box IMEI to Sell' }
+                    )
+                  }
+                  className="px-3 py-2.5 rounded-xl bg-[#0A2540] text-white text-xs font-bold flex items-center gap-1.5 shrink-0 active:scale-95"
+                >
+                  <ScanLine className="w-4 h-4" />
+                  <span>Scan</span>
+                </button>
+              </div>
+
+              {/* Available IMEI Checklist */}
+              <div className="space-y-1.5">
+                {getProductAllImeis(imeiPickerModal.product)
+                  .filter(
+                    (im) =>
+                      !imeiPickerModal.search.trim() ||
+                      im.toLowerCase().includes(imeiPickerModal.search.trim().toLowerCase())
+                  )
+                  .map((im) => {
+                    const isPicked = imeiPickerModal.selectedImeis.includes(im);
+                    return (
+                      <button
+                        key={im}
+                        type="button"
+                        onClick={() =>
+                          setImeiPickerModal((prev) => {
+                            if (!prev) return null;
+                            const next = isPicked
+                              ? prev.selectedImeis.filter((x) => x !== im)
+                              : [...prev.selectedImeis, im];
+                            return { ...prev, selectedImeis: next };
+                          })
+                        }
+                        className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl border text-xs font-mono transition-colors ${
+                          isPicked
+                            ? 'bg-emerald-50 border-emerald-400 text-emerald-900 font-extrabold'
+                            : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                        }`}
+                      >
+                        <span className="truncate">{im}</span>
+                        <span
+                          className={`w-5 h-5 rounded-md flex items-center justify-center shrink-0 ${
+                            isPicked
+                              ? 'bg-emerald-600 text-white'
+                              : 'border border-slate-300 bg-white'
+                          }`}
+                        >
+                          {isPicked && <Check className="w-3.5 h-3.5" />}
+                        </span>
+                      </button>
+                    );
+                  })}
+              </div>
+            </div>
+
+            <div className="p-3.5 bg-white border-t border-slate-200 grid grid-cols-2 gap-2.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => setImeiPickerModal(null)}
+                className="py-3 rounded-xl border border-slate-300 text-slate-700 font-bold text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={imeiPickerModal.selectedImeis.length === 0}
+                onClick={handleConfirmImeiPicker}
+                className="py-3 rounded-xl bg-[#4CAF50] hover:bg-emerald-600 text-white font-extrabold text-xs disabled:opacity-50"
+              >
+                Add to Bill ({imeiPickerModal.selectedImeis.length})
               </button>
             </div>
           </div>

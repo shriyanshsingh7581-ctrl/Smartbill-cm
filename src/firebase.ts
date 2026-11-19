@@ -306,10 +306,19 @@ export interface UserProfileDoc {
   updatedAt?: Timestamp;
 }
 
+export interface StockAdjustmentLog {
+  id: string;
+  dateStr: string;
+  qtyRemoved: number;
+  reason: string;
+  removedImeis?: string[];
+}
+
 export interface ProductVariantItem {
   variantName: string;
   quantity: number;
   barcode: string;
+  imeis?: string[];
   mrp: number;
   retailPrice: number;
   wholesalePrice: number;
@@ -352,6 +361,9 @@ export interface ProductDoc {
   archived: boolean;
   variants: ProductVariantItem[];
   bomItems?: { rawMaterialName: string; qtyRequired: number; unit: string }[];
+  imeis?: string[];
+  imeiPhotoUrls?: string[];
+  stockAdjustments?: StockAdjustmentLog[];
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
 }
@@ -361,6 +373,7 @@ export interface OrderLineItem {
   name: string;
   variantName?: string;
   barcode?: string;
+  soldImeis?: string[];
   unit: string;
   qty: number;
   mrp: number;
@@ -618,15 +631,80 @@ export async function saveProductToDb(uid: string, product: Partial<ProductDoc> 
   const id = cleanId(existingRecord ? product.id : undefined);
   const path = `users/${uid}/products/${id}`;
   const ref = doc(db, 'users', uid, 'products', id);
-  const detailsPayload = JSON.stringify({
-    variants: product.variants || [],
+  const normalizedVariants = (product.variants || []).map((v) => {
+    const cleanVarImeis = Array.from(
+      new Set(
+        (v.imeis || [])
+          .map((c) => String(c || '').trim())
+          .filter((c) => c.length > 0)
+          .map((c) => c.slice(0, 40))
+      )
+    );
+    return {
+      ...v,
+      imeis: cleanVarImeis,
+    };
+  });
+
+  const allVariantImeis = normalizedVariants.flatMap((v) => v.imeis || []);
+  const cleanImeis = Array.from(
+    new Set(
+      [...(product.imeis || []), ...allVariantImeis]
+        .map((c) => String(c || '').trim())
+        .filter((c) => c.length > 0)
+        .map((c) => c.slice(0, 40))
+    )
+  ).slice(0, 350);
+
+  const cleanImeiPhotos = Array.from(
+    new Set(
+      (product.imeiPhotoUrls || [])
+        .map((u) => cleanUrl(u, ''))
+        .filter((u) => u.length > 0)
+    )
+  ).slice(0, 8);
+
+  const cleanAdjustments = (product.stockAdjustments || []).slice(0, 20);
+
+  // Avoid duplicating large IMEI arrays in both variants[0].imeis and top-level imeis if payload approaches 9800 chars
+  let detailsPayload = JSON.stringify({
+    variants: normalizedVariants,
     bomItems: product.bomItems || [],
-  }).slice(0, 10000);
+    imeis: cleanImeis,
+    imeiPhotoUrls: cleanImeiPhotos,
+    stockAdjustments: cleanAdjustments,
+  });
+  if (detailsPayload.length > 9800) {
+    const compactVariants = normalizedVariants.map((v) => ({ ...v, imeis: undefined }));
+    detailsPayload = JSON.stringify({
+      variants: compactVariants,
+      bomItems: product.bomItems || [],
+      imeis: cleanImeis,
+      imeiPhotoUrls: cleanImeiPhotos,
+      stockAdjustments: cleanAdjustments.slice(0, 10),
+    });
+  }
+  if (detailsPayload.length > 9800) {
+    const compactVariants = normalizedVariants.map((v) => ({ ...v, imeis: undefined }));
+    let maxImeis = cleanImeis.length;
+    while (detailsPayload.length > 9800 && maxImeis > 0) {
+      maxImeis = Math.max(0, maxImeis - 25);
+      detailsPayload = JSON.stringify({
+        variants: compactVariants.slice(0, 3),
+        bomItems: [],
+        imeis: cleanImeis.slice(0, maxImeis),
+        imeiPhotoUrls: cleanImeiPhotos.slice(0, 2),
+        stockAdjustments: cleanAdjustments.slice(0, 5),
+      });
+    }
+  }
+
+  const primaryBarcode = cleanStr(product.barcode || cleanImeis[0] || '', 64, '');
 
   const baseFields = {
     name: cleanStr(product.name, 200, 'Unnamed Product'),
     variantName: cleanStr(product.variantName, 120, ''),
-    barcode: cleanStr(product.barcode, 64, ''),
+    barcode: primaryBarcode,
     unit: cleanStr(product.unit, 32, 'Piece'),
     mrp: Math.max(0, Number(product.mrp) || 0),
     retailPrice: Math.max(0, Number(product.retailPrice) || 0),
@@ -705,17 +783,80 @@ export async function createOrderInDb(
       updatedAt: serverTimestamp(),
     });
 
-    // Deduct sold quantities from Firebase stock
+    // Deduct sold quantities AND exact sold IMEI(s) from Firebase stock
+    // Track per-product mutations locally in case two line items reference the same product
+    const workingProducts = new Map<string, ProductDoc>(
+      currentProducts.map((p) => [p.id, { ...p }])
+    );
+
     for (const item of order.items) {
+      const soldList = (item.soldImeis || [])
+        .map((c) => String(c || '').trim())
+        .filter(Boolean);
+      const soldSetLower = new Set(soldList.map((c) => c.toLowerCase()));
+
+      const allVals = Array.from(workingProducts.values());
       const matched =
-        currentProducts.find((p) => item.productId && p.id === item.productId) ||
-        currentProducts.find((p) => item.barcode && p.barcode === item.barcode) ||
-        currentProducts.find((p) => item.name && p.name.toLowerCase() === item.name.toLowerCase());
+        allVals.find((p) => item.productId && p.id === item.productId) ||
+        allVals.find(
+          (p) =>
+            soldList.length > 0 &&
+            (p.imeis?.some((im) => soldSetLower.has(im.toLowerCase())) ||
+              (p.barcode && soldSetLower.has(p.barcode.toLowerCase())))
+        ) ||
+        allVals.find(
+          (p) =>
+            item.barcode &&
+            (p.barcode === item.barcode ||
+              p.imeis?.some((im) => im.toLowerCase() === item.barcode!.toLowerCase()))
+        ) ||
+        allVals.find((p) => item.name && p.name.toLowerCase() === item.name.toLowerCase());
+
       if (matched) {
-        await saveProductToDb(uid, {
-          ...matched,
-          quantity: Number(matched.quantity || 0) - Number(item.qty || 0),
+        const deductQty = Math.max(0, Number(item.qty || 0));
+        const remainingImeis = (matched.imeis || []).filter(
+          (im) => !soldSetLower.has(im.trim().toLowerCase())
+        );
+
+        const updatedVariants = (matched.variants || []).map((v, idx) => {
+          const hadVarImeis = Array.isArray(v.imeis) && v.imeis.length > 0;
+          const nextVarImeis = hadVarImeis
+            ? v.imeis!.filter((im) => !soldSetLower.has(im.trim().toLowerCase()))
+            : v.imeis;
+          const nextVarBarcode =
+            v.barcode && soldSetLower.has(v.barcode.trim().toLowerCase())
+              ? (nextVarImeis && nextVarImeis[0]) || remainingImeis[0] || ''
+              : v.barcode;
+          const nextVarQty =
+            hadVarImeis && soldSetLower.size > 0
+              ? nextVarImeis!.length
+              : idx === 0
+                ? Math.max(0, Number(v.quantity || 0) - deductQty)
+                : v.quantity;
+          return {
+            ...v,
+            barcode: nextVarBarcode,
+            imeis: nextVarImeis,
+            quantity: nextVarQty,
+          };
         });
+
+        const nextBarcode =
+          matched.barcode && soldSetLower.has(matched.barcode.trim().toLowerCase())
+            ? remainingImeis[0] || ''
+            : matched.barcode || remainingImeis[0] || '';
+
+        const nextQty = Math.max(0, Number(matched.quantity || 0) - deductQty);
+
+        const updatedProduct: ProductDoc = {
+          ...matched,
+          barcode: nextBarcode,
+          quantity: nextQty,
+          imeis: remainingImeis,
+          variants: updatedVariants,
+        };
+        workingProducts.set(matched.id, updatedProduct);
+        await saveProductToDb(uid, updatedProduct);
       }
     }
     return id;
@@ -1045,12 +1186,36 @@ export function subscribeToUserData(
       (snap) => {
         const list: ProductDoc[] = snap.docs.map((docSnap) => {
           const d = docSnap.data();
-          let parsedDetails: { variants?: ProductVariantItem[]; bomItems?: ProductDoc['bomItems'] } = {};
+          let parsedDetails: {
+            variants?: ProductVariantItem[];
+            bomItems?: ProductDoc['bomItems'];
+            imeis?: string[];
+            imeiPhotoUrls?: string[];
+            stockAdjustments?: StockAdjustmentLog[];
+          } = {};
           try {
             if (d.detailsPayload) parsedDetails = JSON.parse(d.detailsPayload);
           } catch {
             parsedDetails = {};
           }
+          const topImeis = Array.isArray(parsedDetails.imeis) ? parsedDetails.imeis : [];
+          const hydratedVariants = (parsedDetails.variants || []).map((v, idx) => ({
+            ...v,
+            imeis:
+              Array.isArray(v.imeis) && v.imeis.length > 0
+                ? v.imeis
+                : idx === 0 && topImeis.length > 0
+                  ? topImeis
+                  : v.barcode
+                    ? [v.barcode]
+                    : [],
+          }));
+          const mergedImeis = Array.from(
+            new Set([
+              ...topImeis,
+              ...hydratedVariants.flatMap((v) => v.imeis || []),
+            ].filter(Boolean))
+          );
           return {
             id: docSnap.id,
             ownerId: d.ownerId,
@@ -1073,8 +1238,15 @@ export function subscribeToUserData(
             expiryDate: d.expiryDate || '',
             imageUrl: d.imageUrl || '',
             archived: Boolean(d.archived),
-            variants: parsedDetails.variants || [],
+            variants: hydratedVariants,
             bomItems: parsedDetails.bomItems || [],
+            imeis: mergedImeis,
+            imeiPhotoUrls: Array.isArray(parsedDetails.imeiPhotoUrls)
+              ? parsedDetails.imeiPhotoUrls
+              : [],
+            stockAdjustments: Array.isArray(parsedDetails.stockAdjustments)
+              ? parsedDetails.stockAdjustments
+              : [],
             createdAt: d.createdAt,
             updatedAt: d.updatedAt,
           };

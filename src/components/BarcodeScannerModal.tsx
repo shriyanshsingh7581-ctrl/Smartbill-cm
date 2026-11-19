@@ -1,16 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Camera,
+  Check,
   CheckCircle2,
   ImagePlus,
   Loader2,
   RefreshCw,
   ScanLine,
+  X,
   Zap,
   ZapOff,
   ZoomIn,
 } from 'lucide-react';
 import {
+  boostImageDataContrast,
   createSafeNativeBarcodeDetector,
   decodeBarcodesFromCanvas,
   decodeBarcodesFromImageFile,
@@ -27,13 +30,17 @@ interface BarcodeScannerModalProps {
   onScanSuccess: (barcode: string, visionResult?: ScannedVisionResult) => void;
   scanMode?: 'barcode_or_imei' | 'bill_items';
   title?: string;
+  bulkMode?: boolean;
+  initialCodes?: string[];
+  onBulkComplete?: (codes: string[]) => void;
 }
 
-// Crisp POS scanner beep + mobile haptic vibration
+// Shared AudioContext for instant zero-latency POS scanner beep + haptic vibration
+let sharedBeepCtx: AudioContext | null = null;
 function playScanFeedback() {
   try {
     if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
-      navigator.vibrate(70);
+      navigator.vibrate(65);
     }
   } catch {
     // ignore vibration errors
@@ -43,40 +50,57 @@ function playScanFeedback() {
       window.AudioContext ||
       (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!AudioCtx) return;
-    const ctx = new AudioCtx();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
+    if (!sharedBeepCtx || sharedBeepCtx.state === 'closed') {
+      sharedBeepCtx = new AudioCtx();
+    }
+    if (sharedBeepCtx.state === 'suspended') {
+      void sharedBeepCtx.resume().catch(() => {});
+    }
+    const now = sharedBeepCtx.currentTime;
+    const osc = sharedBeepCtx.createOscillator();
+    const gain = sharedBeepCtx.createGain();
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(1950, ctx.currentTime);
-    gain.gain.setValueAtTime(0.16, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.1);
+    osc.frequency.setValueAtTime(2050, now);
+    gain.gain.setValueAtTime(0.18, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
     osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start();
-    osc.stop(ctx.currentTime + 0.1);
-    setTimeout(() => {
-      void ctx.close().catch(() => {});
-    }, 180);
+    gain.connect(sharedBeepCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.09);
   } catch {
     // Audio playback blocked without gesture
   }
 }
+
+const EMPTY_CODES: string[] = [];
 
 export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   isOpen,
   onClose,
   onScanSuccess,
   title,
+  bulkMode = false,
+  initialCodes = EMPTY_CODES,
+  onBulkComplete,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const photoInputRef = useRef<HTMLInputElement | null>(null);
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
   const onScanRef = useRef(onScanSuccess);
   const onCloseRef = useRef(onClose);
+  const onBulkCompleteRef = useRef(onBulkComplete);
+  const initialCodesRef = useRef(initialCodes);
   const scanLockedRef = useRef(false);
+  const bulkModeRef = useRef(bulkMode);
+  const bulkCodesRef = useRef<string[]>([]);
+  const lastBulkToastTimerRef = useRef<number | null>(null);
+  const duplicateCooldownMapRef = useRef<Map<string, number>>(new Map());
 
   onScanRef.current = onScanSuccess;
   onCloseRef.current = onClose;
+  onBulkCompleteRef.current = onBulkComplete;
+  initialCodesRef.current = initialCodes;
+  bulkModeRef.current = bulkMode;
 
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
   const [retryCounter, setRetryCounter] = useState(0);
@@ -89,39 +113,90 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   const [detectedFlashCode, setDetectedFlashCode] = useState<string | null>(null);
   const [photoDecoding, setPhotoDecoding] = useState(false);
   const [scanHint, setScanHint] = useState<string | null>(null);
+  const [bulkCodes, setBulkCodes] = useState<string[]>([]);
+  const [focusPulse, setFocusPulse] = useState(false);
 
-  const emitCodeDirectly = (rawCode: string) => {
-    const clean = normalizeScannedCode(rawCode);
-    if (!clean || scanLockedRef.current) return;
+  // Sync initial bulk codes once whenever modal opens (avoids re-render loops on new array refs)
+  useEffect(() => {
+    if (isOpen) {
+      const cleanInit = Array.from(
+        new Set(initialCodesRef.current.map((c) => normalizeScannedCode(c)).filter(Boolean))
+      );
+      bulkCodesRef.current = cleanInit;
+      setBulkCodes(cleanInit);
+      duplicateCooldownMapRef.current.clear();
+    }
+  }, [isOpen]);
+
+  const emitCodes = (rawCodes: string[]) => {
+    const cleanedList = Array.from(
+      new Set(rawCodes.map((c) => normalizeScannedCode(c)).filter((c) => c.length >= 4))
+    );
+    if (cleanedList.length === 0) return;
+
+    if (bulkModeRef.current) {
+      const now = Date.now();
+      const addedNow: string[] = [];
+      for (const code of cleanedList) {
+        const lastSeen = duplicateCooldownMapRef.current.get(code) || 0;
+        if (now - lastSeen < 1400) continue;
+        duplicateCooldownMapRef.current.set(code, now);
+        if (!bulkCodesRef.current.includes(code)) {
+          bulkCodesRef.current = [code, ...bulkCodesRef.current];
+          addedNow.push(code);
+        }
+      }
+
+      if (addedNow.length > 0) {
+        playScanFeedback();
+        setBulkCodes([...bulkCodesRef.current]);
+        setDetectedFlashCode(
+          addedNow.length === 1 ? addedNow[0] : `+${addedNow.length} codes added`
+        );
+        setScanHint(null);
+        if (lastBulkToastTimerRef.current) {
+          window.clearTimeout(lastBulkToastTimerRef.current);
+        }
+        lastBulkToastTimerRef.current = window.setTimeout(() => {
+          setDetectedFlashCode(null);
+        }, 650);
+      }
+      return;
+    }
+
+    // Single-code instant mode: 25ms visual flash for instant "fatak se" scan feel
+    const primary = cleanedList[0];
+    if (!primary || scanLockedRef.current) return;
     scanLockedRef.current = true;
     playScanFeedback();
-    setDetectedFlashCode(clean);
+    setDetectedFlashCode(primary);
 
-    const isImei = /^\d{15}$/.test(clean);
+    const isImei = /^\d{15}$/.test(primary);
     window.setTimeout(() => {
-      onScanRef.current(clean, {
-        code: clean,
+      onScanRef.current(primary, {
+        code: primary,
+        allCodes: cleanedList,
         codeType: isImei ? 'imei' : 'barcode',
       });
       setDetectedFlashCode(null);
       setManualCode('');
       onCloseRef.current();
-    }, 220);
+    }, 25);
   };
 
-  // Pure local photo barcode/IMEI decode (ZERO AI) for fallback or gallery images
+  // Pure local photo barcode/IMEI decode (fast multi-pass local ZXing + Native)
   const processLocalPhotoFile = async (file: File) => {
     setScanHint(null);
     setPhotoDecoding(true);
     try {
       const localRes = await decodeBarcodesFromImageFile(file);
-      if (localRes.primary) {
+      if (localRes.allCodes.length > 0) {
         setPhotoDecoding(false);
-        emitCodeDirectly(localRes.primary);
+        emitCodes(bulkModeRef.current ? localRes.allCodes : [localRes.primary]);
         return;
       }
       setPhotoDecoding(false);
-      setScanHint('Photo mein barcode/IMEI clear nahi mila. Live camera ko barcode ke paas rakhein.');
+      setScanHint('Photo mein barcode/IMEI clear nahi mila. Camera ko thoda seedha aur nazdeek rakhein.');
     } catch {
       setPhotoDecoding(false);
       setScanHint('Photo decode nahi hui. Live camera ya clear photo try karein.');
@@ -149,25 +224,37 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     setScanHint(null);
 
     let stream: MediaStream | null = null;
+    let scanRafId: number | null = null;
     let scanTimerId: number | null = null;
     let active = true;
     let tickCount = 0;
 
-    // Preload local C++ ZXing-WASM immediately in parallel with camera open
-    void warmupZxingWasm();
+    // Preload local C++ ZXing-WASM & native detector immediately in parallel with camera startup
+    const decodersPromise = Promise.all([
+      warmupZxingWasm(),
+      createSafeNativeBarcodeDetector(),
+    ]);
 
     async function acquireStream(): Promise<MediaStream> {
+      // Request crisp 1920x1080 @ 30fps first so tiny 15-digit IMEI Code-128 bars have 2.2x sharper pixels,
+      // falling back seamlessly to 1280x720 or default camera.
       const attempts: MediaStreamConstraints[] = [
         {
           video: {
             facingMode: { ideal: facingMode },
-            width: { ideal: 1920, min: 640 },
-            height: { ideal: 1080, min: 480 },
+            width: { ideal: 1920, min: 1280 },
+            height: { ideal: 1080, min: 720 },
+            frameRate: { ideal: 30 },
           },
           audio: false,
         },
         {
-          video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+          video: {
+            facingMode: { ideal: facingMode },
+            width: { ideal: 1280, min: 640 },
+            height: { ideal: 720, min: 480 },
+            frameRate: { ideal: 30 },
+          },
           audio: false,
         },
         { video: { facingMode }, audio: false },
@@ -201,21 +288,29 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
           return;
         }
 
-        // Enable continuous autofocus + detect optical/digital zoom for small IMEI barcodes
+        // Enable continuous autofocus + auto 1.5x zoom on single-IMEI scan so tiny mobile box stickers lock instantly
         const track = stream.getVideoTracks()[0];
         if (track && typeof track.getCapabilities === 'function') {
           try {
             const caps = track.getCapabilities() as Record<string, unknown>;
             if (caps) {
+              const adv: MediaTrackConstraintSet[] = [];
               const focusModes = Array.isArray(caps.focusMode) ? (caps.focusMode as string[]) : [];
               if (focusModes.includes('continuous')) {
-                await track.applyConstraints({
-                  advanced: [{ focusMode: 'continuous' } as MediaTrackConstraintSet],
-                });
+                adv.push({ focusMode: 'continuous' } as MediaTrackConstraintSet);
               }
               const zoomCap = caps.zoom as { min?: number; max?: number } | undefined;
               if (zoomCap && typeof zoomCap.max === 'number' && zoomCap.max > 1.2) {
-                setMaxZoom(Math.min(zoomCap.max, 4));
+                const clampedMax = Math.min(zoomCap.max, 4);
+                setMaxZoom(clampedMax);
+                // Auto-apply gentle 1.5x macro-friendly zoom in single-IMEI mode
+                if (!bulkModeRef.current && clampedMax >= 1.5) {
+                  adv.push({ zoom: 1.5 } as MediaTrackConstraintSet);
+                  setZoomLevel(1.5);
+                }
+              }
+              if (adv.length > 0) {
+                await track.applyConstraints({ advanced: adv });
               }
             }
           } catch {
@@ -231,64 +326,127 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
         if (!active) return;
         setCameraState('live');
 
-        // Prepare pure-local real-time decoders:
-        // 1. ZXing-C++ WebAssembly (primary — handles 1D Code-128 IMEI, EAN-13, UPC, Code-39, ITF, QR at C++ speed)
-        // 2. Native Browser BarcodeDetector (hardware accelerated when supported)
-        // 3. Pure-JS @zxing/library fallback (only if WASM is unavailable)
-        const [wasmReady, nativeDetector] = await Promise.all([
-          warmupZxingWasm(),
-          createSafeNativeBarcodeDetector(),
-        ]);
+        // Await already-started decoder init
+        const [wasmReady, nativeDetector] = await decodersPromise;
 
         const scanCanvas = document.createElement('canvas');
         const scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
 
+        const scheduleNextTick = (delayMs: number) => {
+          if (!active || (!bulkModeRef.current && scanLockedRef.current)) return;
+          if (delayMs <= 0) {
+            scanRafId = window.requestAnimationFrame(() => void runAutoScanTick());
+          } else {
+            scanTimerId = window.setTimeout(() => {
+              if (active) {
+                scanRafId = window.requestAnimationFrame(() => void runAutoScanTick());
+              }
+            }, delayMs);
+          }
+        };
+
         const runAutoScanTick = async () => {
-          if (!active || scanLockedRef.current) return;
+          if (!active || (!bulkModeRef.current && scanLockedRef.current)) return;
           const video = videoRef.current;
           if (!video || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
-            scanTimerId = window.setTimeout(() => void runAutoScanTick(), 100);
+            scheduleNextTick(30);
             return;
           }
 
           tickCount += 1;
+          const frameFound: string[] = [];
 
-          // Step 1: Native BarcodeDetector pass (instant hardware decode if available)
-          if (nativeDetector && !scanLockedRef.current) {
+          // Step 1: Hardware-accelerated Native BarcodeDetector (~4-8ms GPU on Android Chrome/WebView!)
+          if (nativeDetector) {
             try {
               const detected = await nativeDetector.detect(video);
-              if (detected && detected.length > 0 && !scanLockedRef.current) {
-                // Prefer valid 15-digit IMEI or first valid barcode
-                const codes = detected
-                  .map((d) => normalizeScannedCode(d.rawValue || ''))
-                  .filter((c) => c.length >= 4);
-                if (codes.length > 0) {
-                  const imeiCode = codes.find((c) => /^\d{15}$/.test(c) && isValidImeiLuhn(c));
-                  emitCodeDirectly(imeiCode || codes[0]);
-                  return;
+              if (detected && detected.length > 0) {
+                const midX = video.videoWidth / 2;
+                const midY = video.videoHeight / 2;
+                const ranked = detected
+                  .map((d) => {
+                    const code = normalizeScannedCode(d.rawValue || '');
+                    let dist = 999999;
+                    if (d.boundingBox) {
+                      const cx = d.boundingBox.x + d.boundingBox.width / 2;
+                      const cy = d.boundingBox.y + d.boundingBox.height / 2;
+                      dist = Math.hypot(cx - midX, (cy - midY) * 1.6);
+                    }
+                    return { code, dist };
+                  })
+                  .filter((item) => item.code.length >= 4);
+
+                if (ranked.length > 0) {
+                  ranked.sort((a, b) => {
+                    const score = (c: string) =>
+                      /^\d{15}$/.test(c) && isValidImeiLuhn(c) ? 3 : /^\d{15}$/.test(c) ? 2 : 1;
+                    const diff = score(b.code) - score(a.code);
+                    if (diff !== 0) return diff;
+                    return a.dist - b.dist;
+                  });
+                  const codes = ranked.map((r) => r.code);
+                  if (bulkModeRef.current) {
+                    frameFound.push(...codes);
+                  } else {
+                    emitCodes(codes);
+                    return;
+                  }
                 }
               }
             } catch {
-              // ignore frame error
+              // ignore native frame error
             }
           }
 
-          // Step 2: Native-resolution ROI crop -> ZXing-C++ WebAssembly (NO downscaling of center laser box!)
-          if (scanCtx && !scanLockedRef.current) {
+          // Step 2: Zero-stall Turbo 1D ZXing-WASM on tight 1:1 native-pixel laser strip (~6-14ms!)
+          // When Native BarcodeDetector IS present, only invoke WASM every 2nd tick so GPU native detector stays at 30-60fps!
+          const shouldRunWasm =
+            Boolean(scanCtx) &&
+            (bulkModeRef.current || !scanLockedRef.current) &&
+            (!nativeDetector || tickCount % 2 === 0 || bulkModeRef.current);
+
+          if (scanCtx && shouldRunWasm) {
             try {
               const vw = video.videoWidth;
               const vh = video.videoHeight;
 
-              // Ticks 1, 2: Sharp center horizontal laser-box strip at FULL native resolution
-              // Tick 3: Wider full-frame scan (catches barcodes held slightly outside center)
-              const isCenterBox = tickCount % 3 !== 0;
-              const sx = isCenterBox ? Math.floor(vw * 0.05) : 0;
-              const sy = isCenterBox ? Math.floor(vh * 0.27) : Math.floor(vh * 0.08);
-              const sw = isCenterBox ? Math.floor(vw * 0.9) : vw;
-              const sh = isCenterBox ? Math.floor(vh * 0.46) : Math.floor(vh * 0.84);
+              const isBulkMode = bulkModeRef.current;
+              const isRotatedOrQrTick = tickCount % 4 === 0;
+              const isContrastTick = tickCount % 8 === 0;
 
-              // Keep center strip crisp up to 1400px wide so narrow Code-128 IMEI bars never blur
-              const maxW = isCenterBox ? 1400 : 1100;
+              let sx: number;
+              let sy: number;
+              let sw: number;
+              let sh: number;
+              let maxW: number;
+              let wasmMode: 'turbo' | 'fast' | 'deep';
+
+              if (isBulkMode) {
+                const isWideTick = tickCount % 2 === 0;
+                sx = isWideTick ? 0 : Math.floor(vw * 0.04);
+                sy = isWideTick ? Math.floor(vh * 0.06) : Math.floor(vh * 0.2);
+                sw = isWideTick ? vw : Math.floor(vw * 0.92);
+                sh = isWideTick ? Math.floor(vh * 0.88) : Math.floor(vh * 0.6);
+                maxW = isWideTick ? 1024 : 900;
+                wasmMode = isWideTick ? 'deep' : 'fast';
+              } else if (isRotatedOrQrTick) {
+                // Slightly taller center box to catch vertical/tilted IMEI stickers or QR codes (~20ms)
+                sx = Math.floor(vw * 0.08);
+                sy = Math.floor(vh * 0.22);
+                sw = Math.floor(vw * 0.84);
+                sh = Math.floor(vh * 0.56);
+                maxW = 840;
+                wasmMode = 'fast';
+              } else {
+                // Tight 1:1 native-resolution horizontal laser strip: ZERO downscaling blur on thin 15-digit IMEI bars (~6-12ms!)
+                sx = Math.floor(vw * 0.06);
+                sy = Math.floor(vh * 0.34);
+                sw = Math.floor(vw * 0.88);
+                sh = Math.floor(vh * 0.32);
+                maxW = 1080;
+                wasmMode = 'turbo';
+              }
+
               const scale = Math.min(1, maxW / Math.max(1, sw));
               const cw = Math.max(64, Math.round(sw * scale));
               const ch = Math.max(64, Math.round(sh * scale));
@@ -300,22 +458,34 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
               scanCtx.drawImage(video, sx, sy, sw, sh, 0, 0, cw, ch);
 
               if (wasmReady) {
-                const imgData = scanCtx.getImageData(0, 0, cw, ch);
-                const symbols = await decodeImageDataWithZxingWasm(imgData);
-                if (symbols.length > 0 && !scanLockedRef.current) {
-                  emitCodeDirectly(symbols[0].text);
-                  return;
+                const rawImgData = scanCtx.getImageData(0, 0, cw, ch);
+                const targetImgData = isContrastTick
+                  ? boostImageDataContrast(rawImgData)
+                  : rawImgData;
+                const symbols = await decodeImageDataWithZxingWasm(targetImgData, wasmMode);
+                if (symbols.length > 0) {
+                  const texts = symbols.map((s) => s.text);
+                  if (bulkModeRef.current) {
+                    frameFound.push(...texts);
+                  } else {
+                    emitCodes(texts);
+                    return;
+                  }
                 }
-              } else {
-                // Pure-JS ZXing fallback only when WebAssembly is blocked
+              } else if (!nativeDetector) {
+                // Pure JS fallback ONLY when neither Native BarcodeDetector nor WASM is available
                 const jsCodes = decodeBarcodesFromCanvas(scanCanvas, {
                   tryRotated: tickCount % 4 === 0,
                   tryInverted: false,
                   scanSlices: false,
                 });
-                if (jsCodes.length > 0 && !scanLockedRef.current) {
-                  emitCodeDirectly(jsCodes[0]);
-                  return;
+                if (jsCodes.length > 0) {
+                  if (bulkModeRef.current) {
+                    frameFound.push(...jsCodes);
+                  } else {
+                    emitCodes(jsCodes);
+                    return;
+                  }
                 }
               }
             } catch {
@@ -323,12 +493,16 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
             }
           }
 
-          if (active && !scanLockedRef.current) {
-            scanTimerId = window.setTimeout(() => void runAutoScanTick(), 95);
+          if (bulkModeRef.current && frameFound.length > 0) {
+            emitCodes(frameFound);
           }
+
+          // Zero-lag next frame: rAF immediately when native GPU detector is active, else 8ms breather
+          scheduleNextTick(nativeDetector ? 0 : 8);
         };
 
-        scanTimerId = window.setTimeout(() => void runAutoScanTick(), 120);
+        // Start scanning immediately on the very first live frame!
+        scheduleNextTick(0);
       } catch (err) {
         if (!active) return;
         const msg =
@@ -344,7 +518,9 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
 
     return () => {
       active = false;
+      if (scanRafId) window.cancelAnimationFrame(scanRafId);
       if (scanTimerId) window.clearTimeout(scanTimerId);
+      if (lastBulkToastTimerRef.current) window.clearTimeout(lastBulkToastTimerRef.current);
       if (stream) {
         stream.getTracks().forEach((t) => t.stop());
       }
@@ -367,17 +543,15 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     }
   };
 
-  const cycleZoom = async () => {
-    const steps = maxZoom >= 2.4 ? [1, 1.6, 2.4] : maxZoom >= 1.5 ? [1, 1.5] : [1];
-    const currentIdx = steps.findIndex((s) => Math.abs(s - zoomLevel) < 0.15);
-    const nextZoom = Math.min(maxZoom, steps[(currentIdx + 1) % steps.length]);
-    setZoomLevel(nextZoom);
+  const applyZoom = async (targetZoom: number) => {
+    const clamped = Math.min(maxZoom, Math.max(1, targetZoom));
+    setZoomLevel(clamped);
     try {
       const stream = videoRef.current?.srcObject as MediaStream | null;
       const track = stream?.getVideoTracks()[0];
       if (track && 'applyConstraints' in track) {
         await track.applyConstraints({
-          advanced: [{ zoom: nextZoom } as MediaTrackConstraintSet],
+          advanced: [{ zoom: clamped } as MediaTrackConstraintSet],
         });
       }
     } catch {
@@ -385,20 +559,60 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     }
   };
 
+  const triggerTapRefocus = async () => {
+    setFocusPulse(true);
+    window.setTimeout(() => setFocusPulse(false), 450);
+    try {
+      const stream = videoRef.current?.srcObject as MediaStream | null;
+      const track = stream?.getVideoTracks()[0];
+      if (track && 'applyConstraints' in track) {
+        await track.applyConstraints({
+          advanced: [{ focusMode: 'single-shot' } as MediaTrackConstraintSet],
+        });
+        window.setTimeout(() => {
+          void track
+            .applyConstraints({
+              advanced: [{ focusMode: 'continuous' } as MediaTrackConstraintSet],
+            })
+            .catch(() => {});
+        }, 350);
+      }
+    } catch {
+      // ignore unsupported single-shot focus
+    }
+  };
+
   const submitManualCode = () => {
     const clean = normalizeScannedCode(manualCode);
     if (!clean) return;
-    emitCodeDirectly(clean);
+    emitCodes([clean]);
+    if (bulkMode) {
+      setManualCode('');
+    }
+  };
+
+  const removeBulkCode = (codeToRemove: string) => {
+    const next = bulkCodesRef.current.filter((c) => c !== codeToRemove);
+    bulkCodesRef.current = next;
+    setBulkCodes(next);
+  };
+
+  const handleFinishBulk = () => {
+    if (onBulkCompleteRef.current) {
+      onBulkCompleteRef.current([...bulkCodesRef.current]);
+    }
+    onCloseRef.current();
   };
 
   if (!isOpen) return null;
 
   const manualClean = normalizeScannedCode(manualCode);
   const manualIsValidImei = /^\d{15}$/.test(manualClean) && isValidImeiLuhn(manualClean);
+  const zoomStops = maxZoom >= 2.8 ? [1, 1.5, 2, 3] : maxZoom >= 1.9 ? [1, 1.5, 2] : [1, 1.5];
 
   return (
-    <div className="fixed inset-0 z-50 bg-black flex flex-col justify-between">
-      {/* Hidden local photo/gallery fallback inputs (Pure local ZXing decode — ZERO AI) */}
+    <div className="fixed inset-0 z-[60] bg-black flex flex-col justify-between">
+      {/* Hidden local photo/gallery fallback inputs */}
       <input
         ref={photoInputRef}
         type="file"
@@ -423,27 +637,34 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
         }}
       />
 
-      {/* Full-Screen Live Camera Video */}
+      {/* Full-Screen Live Camera Video (tap anywhere to refocus!) */}
       <video
         ref={videoRef}
         playsInline
         muted
         autoPlay
+        onClick={() => void triggerTapRefocus()}
         className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-200 ${
           cameraState === 'live' ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
       />
 
       {/* Top Header + Manual Entry Bar */}
-      <div className="relative z-10 pt-7 px-4 pb-3 space-y-2 bg-gradient-to-b from-black/85 via-black/45 to-transparent">
+      <div className="relative z-10 pt-6 px-4 pb-3 space-y-2 bg-gradient-to-b from-black/85 via-black/50 to-transparent">
         <div className="flex items-center justify-between text-white px-1">
           <span className="text-xs font-extrabold tracking-wide flex items-center gap-1.5">
             <ScanLine className="w-4 h-4 text-emerald-400" />
-            {title || 'Barcode & IMEI Scanner'}
+            {title || (bulkMode ? 'Bulk Rapid IMEI Scanner' : 'Fast Barcode & IMEI Scanner')}
           </span>
-          <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/40 text-emerald-300">
-            {cameraState === 'live' ? 'Auto Scan ON' : 'Starting...'}
-          </span>
+          {bulkMode ? (
+            <span className="text-[11px] font-extrabold px-2.5 py-1 rounded-full bg-emerald-500 text-[#0A2540] tabular-nums">
+              {bulkCodes.length} Scanned
+            </span>
+          ) : (
+            <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/40 text-emerald-300">
+              {cameraState === 'live' ? 'Turbo Auto Scan' : 'Starting...'}
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
@@ -473,14 +694,17 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
               onClick={submitManualCode}
               className="bg-emerald-500 text-[#0A2540] text-xs font-extrabold px-4 py-2.5 rounded-xl active:scale-95"
             >
-              OK
+              {bulkMode ? '+ Add' : 'OK'}
             </button>
           )}
         </div>
       </div>
 
       {/* Center Auto-Scan Laser Viewfinder */}
-      <div className="relative z-10 flex-1 flex flex-col items-center justify-center px-5 gap-3">
+      <div
+        onClick={() => void triggerTapRefocus()}
+        className="relative z-10 flex-1 flex flex-col items-center justify-center px-5 gap-3"
+      >
         {photoDecoding ? (
           <div className="bg-black/85 border border-emerald-400/40 rounded-2xl p-6 max-w-xs w-full text-center space-y-2.5">
             <Loader2 className="w-9 h-9 text-emerald-400 animate-spin mx-auto" />
@@ -489,10 +713,12 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
         ) : cameraState === 'live' ? (
           <>
             <div
-              className={`w-full max-w-sm h-44 relative rounded-2xl border-2 overflow-hidden transition-colors duration-150 ${
+              className={`w-full max-w-sm ${bulkMode ? 'h-48' : 'h-44'} relative rounded-2xl border-2 overflow-hidden transition-all duration-150 ${
                 detectedFlashCode
-                  ? 'border-emerald-400 bg-emerald-500/25 shadow-[0_0_25px_rgba(16,185,129,0.7)]'
-                  : 'border-white/75 bg-black/5 shadow-lg'
+                  ? 'border-emerald-400 bg-emerald-500/25 shadow-[0_0_25px_rgba(16,185,129,0.75)]'
+                  : focusPulse
+                    ? 'border-amber-300 bg-amber-300/10'
+                    : 'border-white/75 bg-black/5 shadow-lg'
               }`}
             >
               {/* 4 Corner Brackets */}
@@ -513,17 +739,45 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
               )}
             </div>
 
-            <p className="text-xs font-semibold text-white bg-black/65 px-4 py-1.5 rounded-full text-center">
+            {/* Quick Zoom Pills for tiny IMEI barcodes */}
+            {maxZoom > 1.2 && (
+              <div
+                onClick={(e) => e.stopPropagation()}
+                className="flex items-center gap-1.5 bg-black/65 px-2 py-1 rounded-full border border-white/15"
+              >
+                <ZoomIn className="w-3.5 h-3.5 text-emerald-300 ml-1" />
+                {zoomStops.map((z) => (
+                  <button
+                    key={z}
+                    type="button"
+                    onClick={() => void applyZoom(z)}
+                    className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-colors ${
+                      Math.abs(zoomLevel - z) < 0.15
+                        ? 'bg-emerald-500 text-[#0A2540]'
+                        : 'text-white/85 hover:bg-white/10'
+                    }`}
+                  >
+                    {z}x
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <p className="text-xs font-semibold text-white bg-black/70 px-4 py-1.5 rounded-full text-center">
               {detectedFlashCode
-                ? 'Scanned!'
-                : 'Barcode ya IMEI ko box mein rakhein — apne aap scan hoga'}
+                ? bulkMode
+                  ? 'Added! Next box scan karein...'
+                  : 'Scanned!'
+                : bulkMode
+                  ? 'Ek ke baad ek sabhi box scan karein (Tap to focus)'
+                  : 'Barcode ya IMEI ko box mein rakhein — turant scan hoga'}
             </p>
           </>
         ) : cameraState === 'starting' ? (
           <div className="bg-black/75 border border-white/15 rounded-2xl p-6 max-w-xs w-full text-center space-y-2.5">
             <Loader2 className="w-9 h-9 text-emerald-400 animate-spin mx-auto" />
             <p className="text-sm font-bold text-white">Camera chalu ho raha hai...</p>
-            <p className="text-[11px] text-slate-300">Auto-scan ready in 1 second</p>
+            <p className="text-[11px] text-slate-300">Turbo auto-scan ready in 1 second</p>
           </div>
         ) : (
           <div className="bg-[#0A2540] border border-white/15 rounded-3xl p-5 max-w-sm w-full text-center space-y-4 shadow-2xl">
@@ -562,65 +816,105 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
         )}
       </div>
 
-      {/* Bottom Controls: Flash / Zoom / Flip / Gallery / Cancel */}
-      <div className="relative z-10 pb-7 pt-4 px-5 bg-gradient-to-t from-black via-black/90 to-transparent flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          {cameraState === 'live' && (
-            <>
+      {/* Bottom Controls (+ Bulk Live Scanned Tray when bulkMode=true) */}
+      <div className="relative z-10 pb-6 pt-3 px-4 bg-gradient-to-t from-black via-black/95 to-transparent space-y-3">
+        {bulkMode && bulkCodes.length > 0 && (
+          <div className="bg-white/10 border border-white/15 rounded-2xl p-2.5 space-y-2 backdrop-blur-md">
+            <div className="flex items-center justify-between px-1">
+              <span className="text-[11px] font-bold text-emerald-300">
+                Scanned IMEIs / Codes ({bulkCodes.length})
+              </span>
               <button
                 type="button"
-                onClick={toggleTorch}
-                className={`h-10 px-3 rounded-full flex items-center gap-1.5 text-xs font-bold active:scale-95 ${
-                  torchOn ? 'bg-amber-400 text-slate-900' : 'bg-white/15 text-white'
-                }`}
-                title="Flash / Torch"
+                onClick={() => {
+                  bulkCodesRef.current = [];
+                  setBulkCodes([]);
+                }}
+                className="text-[10px] font-bold text-rose-300"
               >
-                {torchOn ? <Zap className="w-4 h-4" /> : <ZapOff className="w-4 h-4" />}
-                <span>Flash</span>
+                Clear All
               </button>
+            </div>
+            <div className="flex gap-1.5 overflow-x-auto pb-0.5 no-scrollbar">
+              {bulkCodes.map((c, idx) => (
+                <div
+                  key={c}
+                  className="shrink-0 flex items-center gap-1.5 bg-black/70 border border-emerald-400/40 text-white rounded-xl px-2.5 py-1.5 text-[11px] font-mono"
+                >
+                  <span className="text-emerald-400 font-bold">#{bulkCodes.length - idx}</span>
+                  <span>{c}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeBulkCode(c)}
+                    className="text-slate-400 hover:text-rose-400"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
-              {maxZoom > 1.2 && (
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            {cameraState === 'live' && (
+              <>
                 <button
                   type="button"
-                  onClick={cycleZoom}
-                  className="h-10 px-3 rounded-full bg-white/15 text-white text-xs font-bold flex items-center gap-1 active:scale-95"
-                  title="Zoom for tiny IMEI barcodes"
+                  onClick={toggleTorch}
+                  className={`h-10 px-3 rounded-full flex items-center gap-1.5 text-xs font-bold active:scale-95 ${
+                    torchOn ? 'bg-amber-400 text-slate-900' : 'bg-white/15 text-white'
+                  }`}
+                  title="Flash / Torch"
                 >
-                  <ZoomIn className="w-4 h-4 text-emerald-300" />
-                  <span>{zoomLevel.toFixed(1)}x</span>
+                  {torchOn ? <Zap className="w-4 h-4" /> : <ZapOff className="w-4 h-4" />}
+                  <span>Flash</span>
                 </button>
-              )}
 
+                <button
+                  type="button"
+                  onClick={() =>
+                    setFacingMode((prev) => (prev === 'environment' ? 'user' : 'environment'))
+                  }
+                  className="w-10 h-10 rounded-full bg-white/15 text-white flex items-center justify-center active:scale-95"
+                  title="Flip Camera"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                </button>
+              </>
+            )}
+
+            <button
+              type="button"
+              onClick={() => galleryInputRef.current?.click()}
+              className="w-10 h-10 rounded-full bg-white/15 text-white flex items-center justify-center active:scale-95"
+              title="Scan Barcode from Gallery"
+            >
+              <ImagePlus className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {bulkMode && (
               <button
                 type="button"
-                onClick={() =>
-                  setFacingMode((prev) => (prev === 'environment' ? 'user' : 'environment'))
-                }
-                className="w-10 h-10 rounded-full bg-white/15 text-white flex items-center justify-center active:scale-95"
-                title="Flip Camera"
+                onClick={handleFinishBulk}
+                className="bg-emerald-500 text-[#0A2540] font-extrabold text-xs px-4 py-2.5 rounded-xl flex items-center gap-1.5 shadow-lg active:scale-95"
               >
-                <RefreshCw className="w-4 h-4" />
+                <Check className="w-4 h-4" />
+                <span>Done ({bulkCodes.length})</span>
               </button>
-            </>
-          )}
-
-          <button
-            type="button"
-            onClick={() => galleryInputRef.current?.click()}
-            className="w-10 h-10 rounded-full bg-white/15 text-white flex items-center justify-center active:scale-95"
-            title="Scan Barcode from Gallery"
-          >
-            <ImagePlus className="w-4 h-4" />
-          </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-white font-bold text-xs px-3.5 py-2.5 rounded-xl bg-white/10 active:opacity-75"
+            >
+              Cancel
+            </button>
+          </div>
         </div>
-
-        <button
-          type="button"
-          onClick={onClose}
-          className="text-white font-bold text-sm px-4 py-2 rounded-xl bg-white/10 active:opacity-75"
-        >
-          Cancel
-        </button>
       </div>
     </div>
   );
