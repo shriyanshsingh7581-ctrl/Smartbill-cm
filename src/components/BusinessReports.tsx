@@ -236,9 +236,9 @@ export const BusinessReports: React.FC<BusinessReportsProps> = ({
     }, 300);
   };
 
-  // Compute last 7 days Sales Performance chart points
+  // Compute last 7 or 30 days Sales Performance chart points
   const chartData = useMemo(() => {
-    const daysCount = 7;
+    const daysCount = chartRange === '30d' ? 30 : 7;
     const points: { label: string; dateStr: string; amount: number }[] = [];
     const now = new Date();
     for (let i = daysCount - 1; i >= 0; i--) {
@@ -300,6 +300,8 @@ export const BusinessReports: React.FC<BusinessReportsProps> = ({
       const newProfit = (Number(editingOrder.totalAmount) || 0) - totalCost;
       await updateOrderProfitInDb(uid, editingOrder.id, updatedItems, newProfit);
       setEditingOrder(null);
+    } catch (err) {
+      console.error('Failed to update order profit:', err);
     } finally {
       setSavingOrderCost(false);
     }
@@ -315,23 +317,76 @@ export const BusinessReports: React.FC<BusinessReportsProps> = ({
       return { columns: [], rows: [], summaryBadges: [] };
     }
 
+    const parseFlexibleDate = (dateStr?: string): Date | null => {
+      if (!dateStr) return null;
+      const trimmed = dateStr.trim();
+      const dmy = trimmed.match(/^(\d{2})-(\d{2})-(\d{4})/);
+      if (dmy) {
+        return new Date(`${dmy[3]}-${dmy[2]}-${dmy[1]}T00:00:00`);
+      }
+      const parsed = new Date(trimmed);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    };
+
     const filterByDate = (dateStr?: string) => {
       if (dateFilter === 'all' || !dateStr) return true;
+      const itemDate = parseFlexibleDate(dateStr);
+      if (!itemDate) return true;
       const now = new Date();
+      const todayIso = now.toISOString().slice(0, 10);
+      const itemIso = itemDate.toISOString().slice(0, 10);
       if (dateFilter === 'today') {
-        return dateStr.slice(0, 10) === now.toISOString().slice(0, 10);
+        return itemIso === todayIso;
       }
-      const itemDate = new Date(dateStr);
       const diffDays = (now.getTime() - itemDate.getTime()) / (1000 * 3600 * 24);
-      if (dateFilter === '7d') return diffDays <= 7;
-      if (dateFilter === '30d') return diffDays <= 30;
+      if (dateFilter === '7d') return diffDays >= -1 && diffDays <= 7;
+      if (dateFilter === '30d') return diffDays >= -1 && diffDays <= 30;
       return true;
     };
 
     const id = activeReport.id;
 
     if (id === 'sales_summary' || id === 'sales_by_staff' || id === 'sales_by_timeline') {
-      const filteredOrders = orders.filter((o) => filterByDate(o.dateStr));
+      let filteredOrders = orders.filter((o) => filterByDate(o.dateStr));
+      if (id === 'sales_by_staff' && selectedStaffId) {
+        if (selectedStaffId === 'OWNER') {
+          filteredOrders = filteredOrders.filter((o) => {
+            const staffLabel = (o as OrderDoc & { staffName?: string }).staffName;
+            return !staffLabel || staffLabel.toLowerCase() === 'owner';
+          });
+        } else {
+          filteredOrders = filteredOrders.filter((o) => {
+            const staffLabel = (o as OrderDoc & { staffName?: string }).staffName || '';
+            return staffLabel.toLowerCase() === selectedStaffId.toLowerCase();
+          });
+        }
+      }
+      if (id === 'sales_by_timeline' && timelineGenerated) {
+        const startMins = to24Hour(openHour, openMinute, openPeriod);
+        const endMins = to24Hour(closeHour, closeMinute, closePeriod);
+        filteredOrders = filteredOrders.filter((o) => {
+          let mins: number | null = null;
+          if (o.createdAt && typeof o.createdAt.toDate === 'function') {
+            const d = o.createdAt.toDate();
+            mins = d.getHours() * 60 + d.getMinutes();
+          } else if (o.timeStr) {
+            const m = o.timeStr.match(/(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i);
+            if (m) {
+              let hr = Number(m[1]);
+              const mn = Number(m[2]);
+              const mer = m[3]?.toUpperCase();
+              if (mer === 'PM' && hr < 12) hr += 12;
+              if (mer === 'AM' && hr === 12) hr = 0;
+              mins = hr * 60 + mn;
+            }
+          }
+          if (mins === null) return true;
+          if (closesNextDay || endMins <= startMins) {
+            return mins >= startMins || mins <= endMins;
+          }
+          return mins >= startMins && mins <= endMins;
+        });
+      }
       const cols = ['Invoice', 'Date', 'Customer', 'Mode', 'Amount', 'Profit'];
       const r = filteredOrders.map((o) => ({
         _rawOrder: o,
@@ -418,11 +473,31 @@ export const BusinessReports: React.FC<BusinessReportsProps> = ({
         string,
         { name: string; qty: number; price: number; sales: number; profit: number }
       > = {};
+      const supplierItemKeys =
+        id === 'stock_sales_by_supplier' && selectedSupplierId
+          ? new Set(
+              purchases
+                .filter(
+                  (p) =>
+                    p.supplierId === selectedSupplierId ||
+                    (p.supplierName || '').toLowerCase() === selectedSupplierId.toLowerCase()
+                )
+                .flatMap((p) => (p.items || []).map((it) => (it.productId || it.name).toLowerCase()))
+            )
+          : null;
+
       orders
         .filter((o) => filterByDate(o.dateStr))
         .forEach((o) => {
           (o.items || []).forEach((it) => {
             const key = it.productId || it.name;
+            if (
+              supplierItemKeys &&
+              !supplierItemKeys.has((it.productId || '').toLowerCase()) &&
+              !supplierItemKeys.has((it.name || '').toLowerCase())
+            ) {
+              return;
+            }
             if (!map[key]) {
               map[key] = { name: it.name, qty: 0, price: it.retailPrice, sales: 0, profit: 0 };
             }
@@ -513,9 +588,16 @@ export const BusinessReports: React.FC<BusinessReportsProps> = ({
         list = list.filter((p) => p.quantity <= (p.lowStockAlert || 5));
       } else if (id === 'out_of_stock') {
         list = list.filter((p) => p.quantity <= 0);
-      } else if (id === 'expired_stock' || id === 'expiring_products') {
+      } else if (id === 'expired_stock') {
         const nowStr = new Date().toISOString().slice(0, 10);
-        list = list.filter((p) => p.expiryDate && p.expiryDate <= nowStr);
+        list = list.filter((p) => p.expiryDate && p.expiryDate < nowStr);
+      } else if (id === 'expiring_products') {
+        const now = new Date();
+        const nowStr = now.toISOString().slice(0, 10);
+        const soon = new Date(now);
+        soon.setDate(now.getDate() + 30);
+        const soonStr = soon.toISOString().slice(0, 10);
+        list = list.filter((p) => p.expiryDate && p.expiryDate >= nowStr && p.expiryDate <= soonStr);
       }
       const cols = [
         'Product Name',
@@ -542,16 +624,15 @@ export const BusinessReports: React.FC<BusinessReportsProps> = ({
 
     if (id === 'expense_summary') {
       const cols = ['Date', 'Expense Title', 'Category', 'Payment Mode', 'Amount'];
-      const r = expenses
-        .filter((e) => filterByDate(e.dateStr))
-        .map((e) => ({
-          Date: e.dateStr,
-          'Expense Title': e.title,
-          Category: e.category,
-          'Payment Mode': e.paymentMethod,
-          Amount: `₹${Number(e.totalAmount || 0).toFixed(2)}`,
-        }));
-      const totalExp = expenses.reduce((s, e) => s + (Number(e.totalAmount) || 0), 0);
+      const filteredExpenses = expenses.filter((e) => filterByDate(e.dateStr));
+      const r = filteredExpenses.map((e) => ({
+        Date: e.dateStr,
+        'Expense Title': e.title,
+        Category: e.category,
+        'Payment Mode': e.paymentMethod,
+        Amount: `₹${Number(e.totalAmount || 0).toFixed(2)}`,
+      }));
+      const totalExp = filteredExpenses.reduce((s, e) => s + (Number(e.totalAmount) || 0), 0);
       return {
         columns: cols,
         rows: r,
@@ -687,6 +768,14 @@ export const BusinessReports: React.FC<BusinessReportsProps> = ({
     dateFilter,
     selectedStaffId,
     selectedSupplierId,
+    timelineGenerated,
+    openHour,
+    openMinute,
+    openPeriod,
+    closeHour,
+    closeMinute,
+    closePeriod,
+    closesNextDay,
   ]);
 
   // Apply search and column Contains filters
@@ -1430,26 +1519,32 @@ export const BusinessReports: React.FC<BusinessReportsProps> = ({
                       strokeWidth="2.5"
                       points={pointsAttr}
                     />
-                    {coords.map((c, idx) => (
-                      <g key={idx}>
-                        <circle
-                          cx={c.x}
-                          cy={c.y}
-                          r="3.5"
-                          fill="#10B981"
-                          stroke="#ffffff"
-                          strokeWidth="1.5"
-                        />
-                        <text
-                          x={c.x}
-                          y="102"
-                          textAnchor="middle"
-                          className="fill-slate-400 text-[7px]"
-                        >
-                          {c.label}
-                        </text>
-                      </g>
-                    ))}
+                    {coords.map((c, idx) => {
+                      const showLabel =
+                        coords.length <= 7 || idx === 0 || idx === coords.length - 1 || idx % 5 === 0;
+                      return (
+                        <g key={idx}>
+                          <circle
+                            cx={c.x}
+                            cy={c.y}
+                            r={coords.length > 10 ? '2.2' : '3.5'}
+                            fill="#10B981"
+                            stroke="#ffffff"
+                            strokeWidth="1.2"
+                          />
+                          {showLabel && (
+                            <text
+                              x={c.x}
+                              y="102"
+                              textAnchor="middle"
+                              className="fill-slate-400 text-[7px]"
+                            >
+                              {c.label}
+                            </text>
+                          )}
+                        </g>
+                      );
+                    })}
                   </>
                 );
               })()}

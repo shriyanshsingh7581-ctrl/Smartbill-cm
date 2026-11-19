@@ -18,16 +18,21 @@ export const ApkPhotoSheet: React.FC<ApkPhotoSheetProps> = ({
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
   const handleFileSelected = async (file?: File) => {
     if (!file) return;
+    setUploadError(null);
     setUploading(true);
     try {
       const url = await uploadImageToCloudinary(file);
       await onUploaded(url);
       onClose();
+    } catch (err) {
+      console.error('Photo upload failed:', err);
+      setUploadError('Photo upload failed. Please try again.');
     } finally {
       setUploading(false);
     }
@@ -69,12 +74,21 @@ export const ApkPhotoSheet: React.FC<ApkPhotoSheetProps> = ({
           <button
             type="button"
             disabled={uploading}
-            onClick={onClose}
+            onClick={() => {
+              setUploadError(null);
+              onClose();
+            }}
             className="p-2 rounded-full bg-slate-100 text-slate-600"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
+
+        {uploadError && (
+          <p className="text-xs font-semibold text-red-600 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
+            {uploadError}
+          </p>
+        )}
 
         {uploading ? (
           <div className="py-8 text-center space-y-2.5">

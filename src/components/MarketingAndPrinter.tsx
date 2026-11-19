@@ -270,11 +270,15 @@ export const MarketingAndPrinter: React.FC<MarketingAndPrinterProps> = ({
 
               <div className="space-y-2">
                 {products
-                  .filter(
-                    (p) =>
-                      !catalogueSearch.trim() ||
-                      p.name.toLowerCase().includes(catalogueSearch.toLowerCase())
-                  )
+                  .filter((p) => {
+                    if (!catalogueSearch.trim()) return true;
+                    const q = catalogueSearch.trim().toLowerCase();
+                    return (
+                      p.name.toLowerCase().includes(q) ||
+                      (p.barcode && p.barcode.toLowerCase().includes(q)) ||
+                      Boolean(p.variants?.some((v) => v.barcode && v.barcode.toLowerCase().includes(q)))
+                    );
+                  })
                   .map((p) => (
                     <div
                       key={p.id}

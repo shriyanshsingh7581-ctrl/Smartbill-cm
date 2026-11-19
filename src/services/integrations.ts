@@ -1,7 +1,16 @@
 import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
-import { Html5Qrcode } from 'html5-qrcode';
+import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
+import {
+  BarcodeFormat,
+  BinaryBitmap,
+  DecodeHintType,
+  GlobalHistogramBinarizer,
+  HybridBinarizer,
+  MultiFormatReader,
+  RGBLuminanceSource,
+} from '@zxing/library';
 import type { ProductDoc, OrderDoc, ExpenseDoc } from '../firebase';
 
 export interface ScannedBillItem {
@@ -17,12 +26,19 @@ export interface ScannedBillItem {
 export interface ScannedVisionResult {
   code: string;
   codeType: 'barcode' | 'imei' | 'bill' | 'text' | 'none';
+  allCodes?: string[];
   productName?: string;
   price?: number;
   mrp?: number;
   qty?: number;
   items?: ScannedBillItem[];
   rawSummary?: string;
+}
+
+export interface LocalDecodeResult {
+  primary: string;
+  allCodes: string[];
+  codeType: 'imei' | 'barcode' | 'none';
 }
 
 export interface ParsedVoiceItem {
@@ -50,10 +66,87 @@ const getGroqApiKey = (): string => {
 
 const getGeminiVisionKey = (): string => {
   const envKey = (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_GEMINI_API_KEY;
-  if (envKey && envKey.trim()) return envKey.trim();
-  const parts = ['AQ', '.', 'Ab8', 'RN6', 'KR5BhSySW', 'sgB6iAqn2', 'YS1RORyQ5', 'Iq9xIP0DS', 'Evt3nhkA'];
-  return parts.join('');
+  if (envKey && envKey.trim().startsWith('AIza')) return envKey.trim();
+  return '';
 };
+
+// Standard 15-digit IMEI Luhn mod-10 checksum validator
+export function isValidImeiLuhn(raw: string): boolean {
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length !== 15) return false;
+  let sum = 0;
+  for (let i = 0; i < 15; i++) {
+    let d = digits.charCodeAt(i) - 48;
+    if (i % 2 === 1) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+  }
+  return sum % 10 === 0;
+}
+
+export function normalizeScannedCode(raw: string): string {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return '';
+  // If code looks like a spaced/hyphenated 15-digit IMEI, collapse to pure 15 digits
+  const digitsOnly = trimmed.replace(/[\s\-/:.]/g, '');
+  if (/^\d{15}$/.test(digitsOnly)) {
+    return digitsOnly;
+  }
+  return trimmed;
+}
+
+// Extract all 15-digit IMEIs (including spaced/dashed formats) and 8-14 digit barcodes from OCR text
+export function extractAllCodesFromText(raw: string): LocalDecodeResult {
+  const foundSet = new Set<string>();
+  const validImeis: string[] = [];
+  const otherImeis: string[] = [];
+  const barcodes: string[] = [];
+
+  if (!raw) return { primary: '', allCodes: [], codeType: 'none' };
+
+  // 1. Match contiguous 15-digit sequences
+  const direct15 = raw.match(/(?<!\d)\d{15}(?!\d)/g) || [];
+  for (const m of direct15) {
+    if (!foundSet.has(m)) {
+      foundSet.add(m);
+      if (isValidImeiLuhn(m)) validImeis.push(m);
+      else otherImeis.push(m);
+    }
+  }
+
+  // 2. Match formatted IMEIs like "356789 01 234567 8" or "864512-06-123456-7" or "356789/01/234567/8"
+  const formattedCandidates = raw.match(/(?:\d[\s\-/]?){15,18}/g) || [];
+  for (const cand of formattedCandidates) {
+    const digits = cand.replace(/\D/g, '');
+    if (digits.length === 15 && !foundSet.has(digits)) {
+      foundSet.add(digits);
+      if (isValidImeiLuhn(digits)) validImeis.push(digits);
+      else otherImeis.push(digits);
+    }
+  }
+
+  // 3. Match standard retail barcodes (EAN-8, UPC-A 12, EAN-13, ITF-14)
+  const retailMatches = raw.match(/(?<!\d)\d{8,14}(?!\d)/g) || [];
+  for (const m of retailMatches) {
+    if (!foundSet.has(m)) {
+      foundSet.add(m);
+      barcodes.push(m);
+    }
+  }
+
+  const allCodes = [...validImeis, ...otherImeis, ...barcodes];
+  const primary = allCodes[0] || '';
+  const codeType: 'imei' | 'barcode' | 'none' =
+    primary.length === 15 && /^\d{15}$/.test(primary)
+      ? 'imei'
+      : primary
+        ? 'barcode'
+        : 'none';
+
+  return { primary, allCodes, codeType };
+}
 
 // Compress captured mobile photo via HTML5 Canvas for fast Vision & Cloudinary upload
 export async function compressImageFile(
@@ -167,64 +260,387 @@ export async function uploadImageToCloudinary(file: File): Promise<string> {
   }
 }
 
-// 2A. Step A: Local Barcode Decode (Html5Qrcode.scanFile + native BarcodeDetector)
-export async function decodeBarcodeFromImageFile(file: File): Promise<string | null> {
-  // 1. Try native BarcodeDetector first if supported
-  try {
-    const Win = window as unknown as {
-      BarcodeDetector?: new (opts: { formats: string[] }) => {
-        detect: (src: ImageBitmapSource) => Promise<{ rawValue: string }[]>;
-      };
-    };
-    if (Win.BarcodeDetector && typeof createImageBitmap === 'function') {
-      const bitmap = await createImageBitmap(file);
-      const detector = new Win.BarcodeDetector({
-        formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e', 'qr_code', 'itf'],
-      });
-      const detected = await detector.detect(bitmap);
-      bitmap.close?.();
-      if (detected && detected.length > 0 && detected[0].rawValue) {
-        return detected[0].rawValue.trim();
-      }
+// Singleton ZXing MultiFormatReader supporting ALL 1D retail, IMEI (Code-128) & 2D formats
+let cachedZxingReader: MultiFormatReader | null = null;
+function getZxingReader(): MultiFormatReader {
+  if (!cachedZxingReader) {
+    const reader = new MultiFormatReader();
+    const hints = new Map();
+    hints.set(DecodeHintType.TRY_HARDER, true);
+    hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+      BarcodeFormat.CODE_128,
+      BarcodeFormat.EAN_13,
+      BarcodeFormat.EAN_8,
+      BarcodeFormat.UPC_A,
+      BarcodeFormat.UPC_E,
+      BarcodeFormat.CODE_39,
+      BarcodeFormat.CODE_93,
+      BarcodeFormat.ITF,
+      BarcodeFormat.CODABAR,
+      BarcodeFormat.QR_CODE,
+      BarcodeFormat.DATA_MATRIX,
+      BarcodeFormat.PDF_417,
+      BarcodeFormat.RSS_14,
+      BarcodeFormat.RSS_EXPANDED,
+      BarcodeFormat.AZTEC,
+    ]);
+    reader.setHints(hints);
+    cachedZxingReader = reader;
+  }
+  return cachedZxingReader;
+}
+
+const ALL_HTML5_FORMATS = [
+  Html5QrcodeSupportedFormats.CODE_128,
+  Html5QrcodeSupportedFormats.EAN_13,
+  Html5QrcodeSupportedFormats.EAN_8,
+  Html5QrcodeSupportedFormats.UPC_A,
+  Html5QrcodeSupportedFormats.UPC_E,
+  Html5QrcodeSupportedFormats.CODE_39,
+  Html5QrcodeSupportedFormats.CODE_93,
+  Html5QrcodeSupportedFormats.ITF,
+  Html5QrcodeSupportedFormats.CODABAR,
+  Html5QrcodeSupportedFormats.QR_CODE,
+  Html5QrcodeSupportedFormats.DATA_MATRIX,
+  Html5QrcodeSupportedFormats.PDF_417,
+];
+
+function buildLuminanceFromCanvas(
+  canvas: HTMLCanvasElement,
+  boostContrast = false
+): RGBLuminanceSource | null {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx || canvas.width < 8 || canvas.height < 8) return null;
+  const { width, height } = canvas;
+  const imgData = ctx.getImageData(0, 0, width, height).data;
+  const luminances = new Uint8ClampedArray(width * height);
+
+  if (!boostContrast) {
+    for (let i = 0, p = 0; i < imgData.length; i += 4, p++) {
+      // Fast weighted luma (gives crisp 1D bar edges)
+      luminances[p] = (imgData[i] * 77 + imgData[i + 1] * 150 + imgData[i + 2] * 29) >> 8;
     }
-  } catch {
-    // Continue to Html5Qrcode fallback
+  } else {
+    let minL = 255;
+    let maxL = 0;
+    for (let i = 0, p = 0; i < imgData.length; i += 4, p++) {
+      const l = (imgData[i] * 77 + imgData[i + 1] * 150 + imgData[i + 2] * 29) >> 8;
+      luminances[p] = l;
+      if (l < minL) minL = l;
+      if (l > maxL) maxL = l;
+    }
+    const span = Math.max(1, maxL - minL);
+    for (let p = 0; p < luminances.length; p++) {
+      const norm = ((luminances[p] - minL) * 255) / span;
+      // S-curve contrast stretch for glossy phone box IMEI stickers
+      const centered = (norm - 128) * 1.45 + 128;
+      luminances[p] = centered < 0 ? 0 : centered > 255 ? 255 : centered;
+    }
   }
 
-  // 2. Try Html5Qrcode.scanFile on hidden element
-  const tempId = 'smartbill-qr-file-reader';
-  let container = document.getElementById(tempId);
-  if (!container) {
-    container = document.createElement('div');
-    container.id = tempId;
-    container.style.display = 'none';
-    document.body.appendChild(container);
-  }
+  return new RGBLuminanceSource(luminances, width, height);
+}
 
-  try {
-    const scanner = new Html5Qrcode(tempId, { verbose: false });
-    const decoded = await scanner.scanFile(file, false);
+function tryZxingDecodeSource(source: RGBLuminanceSource, tryInverted = false): string | null {
+  const reader = getZxingReader();
+  const attempts = [
+    () => reader.decodeWithState(new BinaryBitmap(new HybridBinarizer(source))),
+    () => reader.decodeWithState(new BinaryBitmap(new GlobalHistogramBinarizer(source))),
+  ];
+  if (tryInverted) {
+    const inv = source.invert();
+    attempts.push(
+      () => reader.decodeWithState(new BinaryBitmap(new HybridBinarizer(inv))),
+      () => reader.decodeWithState(new BinaryBitmap(new GlobalHistogramBinarizer(inv)))
+    );
+  }
+  for (const run of attempts) {
     try {
-      scanner.clear();
+      const res = run();
+      const text = normalizeScannedCode(res.getText());
+      if (text) return text;
     } catch {
-      // ignore clear errors
+      // Not found in this pass
     }
-    if (decoded && decoded.trim()) {
-      return decoded.trim();
-    }
-  } catch {
-    // No barcode decoded locally — Step B AI Vision will handle it
   }
-
   return null;
 }
 
-// 2B. Step B: AI Vision OCR Fallback (Gemini Flash Vision -> Groq Vision fallback)
+function createRotatedCanvas(source: HTMLCanvasElement, angleDeg: 90 | 270): HTMLCanvasElement {
+  const rot = document.createElement('canvas');
+  rot.width = source.height;
+  rot.height = source.width;
+  const ctx = rot.getContext('2d');
+  if (ctx) {
+    ctx.translate(rot.width / 2, rot.height / 2);
+    ctx.rotate((angleDeg * Math.PI) / 180);
+    ctx.drawImage(source, -source.width / 2, -source.height / 2);
+  }
+  return rot;
+}
+
+function createCropCanvas(
+  source: HTMLCanvasElement,
+  sxPct: number,
+  syPct: number,
+  swPct: number,
+  shPct: number
+): HTMLCanvasElement {
+  const sx = Math.floor(source.width * sxPct);
+  const sy = Math.floor(source.height * syPct);
+  const sw = Math.max(16, Math.floor(source.width * swPct));
+  const sh = Math.max(16, Math.floor(source.height * shPct));
+  const crop = document.createElement('canvas');
+  crop.width = sw;
+  crop.height = sh;
+  const ctx = crop.getContext('2d');
+  if (ctx) {
+    ctx.drawImage(source, sx, sy, sw, sh, 0, 0, sw, sh);
+  }
+  return crop;
+}
+
+// Fast multi-pass canvas decoder used by BOTH live video frames and captured photos
+export function decodeBarcodesFromCanvas(
+  canvas: HTMLCanvasElement,
+  options: { tryRotated?: boolean; tryInverted?: boolean; scanSlices?: boolean } = {}
+): string[] {
+  const results = new Set<string>();
+  const addIfFound = (code: string | null) => {
+    if (code && code.length >= 4) results.add(code);
+  };
+
+  // Pass 1: Direct canvas (standard + contrast-boosted)
+  const src1 = buildLuminanceFromCanvas(canvas, false);
+  if (src1) addIfFound(tryZxingDecodeSource(src1, options.tryInverted));
+
+  if (results.size === 0 || options.scanSlices) {
+    const srcBoost = buildLuminanceFromCanvas(canvas, true);
+    if (srcBoost) addIfFound(tryZxingDecodeSource(srcBoost, options.tryInverted));
+  }
+
+  // Pass 2: Horizontal band slices (critical when a mobile phone box has 3 stacked barcodes: EAN + IMEI 1 + IMEI 2!)
+  if (options.scanSlices) {
+    const bands: [number, number, number, number][] = [
+      [0.05, 0.2, 0.9, 0.6], // Center band
+      [0.04, 0.05, 0.92, 0.38], // Upper band
+      [0.04, 0.32, 0.92, 0.36], // Middle strip
+      [0.04, 0.58, 0.92, 0.38], // Lower band
+    ];
+    for (const [x, y, w, h] of bands) {
+      const slice = createCropCanvas(canvas, x, y, w, h);
+      const sLum = buildLuminanceFromCanvas(slice, false);
+      if (sLum) addIfFound(tryZxingDecodeSource(sLum, false));
+      const sBoost = buildLuminanceFromCanvas(slice, true);
+      if (sBoost) addIfFound(tryZxingDecodeSource(sBoost, false));
+    }
+  }
+
+  // Pass 3: 90° rotated frame (vertical barcodes / portrait phone box IMEI stickers)
+  if (options.tryRotated && (results.size === 0 || options.scanSlices)) {
+    const rot90 = createRotatedCanvas(canvas, 90);
+    const rLum = buildLuminanceFromCanvas(rot90, false);
+    if (rLum) addIfFound(tryZxingDecodeSource(rLum, false));
+    const rBoost = buildLuminanceFromCanvas(rot90, true);
+    if (rBoost) addIfFound(tryZxingDecodeSource(rBoost, false));
+  }
+
+  return sortDetectedCodes(Array.from(results));
+}
+
+function sortDetectedCodes(codes: string[]): string[] {
+  const unique = Array.from(new Set(codes.map(normalizeScannedCode).filter(Boolean)));
+  return unique.sort((a, b) => {
+    const score = (c: string) => {
+      if (/^\d{15}$/.test(c) && isValidImeiLuhn(c)) return 4;
+      if (/^\d{15}$/.test(c)) return 3;
+      if (/^\d{8,14}$/.test(c)) return 2;
+      return 1;
+    };
+    return score(b) - score(a);
+  });
+}
+
+// Helper to get supported native BarcodeDetector safely (avoiding unsupported-format throws)
+let cachedNativeFormats: string[] | null = null;
+export async function createSafeNativeBarcodeDetector(): Promise<{
+  detect: (src: ImageBitmapSource) => Promise<{ rawValue: string }[]>;
+} | null> {
+  try {
+    const Win = window as unknown as {
+      BarcodeDetector?: {
+        new (opts?: { formats: string[] }): {
+          detect: (src: ImageBitmapSource) => Promise<{ rawValue: string }[]>;
+        };
+        getSupportedFormats?: () => Promise<string[]>;
+      };
+    };
+    if (!Win.BarcodeDetector) return null;
+
+    const desired = [
+      'code_128',
+      'ean_13',
+      'ean_8',
+      'upc_a',
+      'upc_e',
+      'code_39',
+      'code_93',
+      'itf',
+      'codabar',
+      'qr_code',
+      'data_matrix',
+      'pdf417',
+    ];
+    if (!cachedNativeFormats) {
+      if (typeof Win.BarcodeDetector.getSupportedFormats === 'function') {
+        const supported = await Win.BarcodeDetector.getSupportedFormats();
+        cachedNativeFormats = desired.filter((f) => supported.includes(f));
+      } else {
+        cachedNativeFormats = ['ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e', 'qr_code', 'itf'];
+      }
+    }
+    if (cachedNativeFormats.length === 0) return null;
+    return new Win.BarcodeDetector({ formats: cachedNativeFormats });
+  } catch {
+    return null;
+  }
+}
+
+async function loadImageFileToCanvas(file: File, maxDim = 1400): Promise<HTMLCanvasElement | null> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          if (width > height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, width);
+        canvas.height = Math.max(1, height);
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) {
+          URL.revokeObjectURL(url);
+          resolve(null);
+          return;
+        }
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        URL.revokeObjectURL(url);
+        resolve(canvas);
+      } catch {
+        URL.revokeObjectURL(url);
+        resolve(null);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve(null);
+    };
+    img.src = url;
+  });
+}
+
+// 2A. Step A: Multi-Pass Local Barcode & IMEI Decode (Native BarcodeDetector + ZXing + Html5Qrcode)
+export async function decodeBarcodesFromImageFile(file: File): Promise<LocalDecodeResult> {
+  const collected = new Set<string>();
+  const canvas = await loadImageFileToCanvas(file, 1400);
+
+  // 1. Native BarcodeDetector on full frame + center crop + 90° rotated frame
+  try {
+    const detector = await createSafeNativeBarcodeDetector();
+    if (detector && canvas) {
+      const targets = [
+        canvas,
+        createCropCanvas(canvas, 0.05, 0.2, 0.9, 0.6),
+        createRotatedCanvas(canvas, 90),
+      ];
+      for (const target of targets) {
+        try {
+          const detected = await detector.detect(target);
+          for (const item of detected || []) {
+            const val = normalizeScannedCode(item.rawValue || '');
+            if (val) collected.add(val);
+          }
+        } catch {
+          // skip target error
+        }
+      }
+    }
+  } catch {
+    // Continue to ZXing engine
+  }
+
+  // 2. ZXing MultiFormatReader (TRY_HARDER + Hybrid & GlobalHistogram + band slices + rotation + contrast boost)
+  if (canvas) {
+    const zxingCodes = decodeBarcodesFromCanvas(canvas, {
+      tryRotated: true,
+      tryInverted: true,
+      scanSlices: true,
+    });
+    for (const c of zxingCodes) collected.add(c);
+  }
+
+  // 3. Html5Qrcode.scanFile tertiary fallback (with explicit 1D/2D formats & clean DOM teardown)
+  if (collected.size === 0) {
+    const tempId = `smartbill-qr-file-reader-${Date.now()}`;
+    const container = document.createElement('div');
+    container.id = tempId;
+    container.style.position = 'fixed';
+    container.style.left = '-9999px';
+    container.style.top = '-9999px';
+    container.style.width = '300px';
+    container.style.height = '300px';
+    document.body.appendChild(container);
+
+    let scanner: Html5Qrcode | null = null;
+    try {
+      scanner = new Html5Qrcode(tempId, {
+        formatsToSupport: ALL_HTML5_FORMATS,
+        verbose: false,
+      });
+      const decoded = await scanner.scanFile(file, false);
+      const norm = normalizeScannedCode(decoded || '');
+      if (norm) collected.add(norm);
+    } catch {
+      // No barcode decoded by Html5Qrcode — AI Vision will handle printed IMEI/blurry labels
+    } finally {
+      try {
+        scanner?.clear();
+      } catch {
+        // ignore clear error
+      }
+      container.remove();
+    }
+  }
+
+  const allCodes = sortDetectedCodes(Array.from(collected));
+  const primary = allCodes[0] || '';
+  const codeType: 'imei' | 'barcode' | 'none' =
+    /^\d{15}$/.test(primary) ? 'imei' : primary ? 'barcode' : 'none';
+
+  return { primary, allCodes, codeType };
+}
+
+export async function decodeBarcodeFromImageFile(file: File): Promise<string | null> {
+  const res = await decodeBarcodesFromImageFile(file);
+  return res.primary || null;
+}
+
+// 2B. Step B: AI Vision OCR Fallback (Groq Llama 4 Vision + optional Gemini Flash Vision)
 export async function extractScanWithVisionAI(
   file: File,
   mode: 'barcode_or_imei' | 'bill_items' = 'barcode_or_imei'
 ): Promise<ScannedVisionResult> {
-  const { base64, mimeType } = await compressImageFile(file, 1280, 0.85);
+  const { base64, mimeType } = await compressImageFile(file, 1400, 0.88);
   if (!base64) {
     return { code: '', codeType: 'none' };
   }
@@ -232,12 +648,14 @@ export async function extractScanWithVisionAI(
   const promptText =
     mode === 'bill_items'
       ? `You are an expert Indian retail POS OCR & Barcode/IMEI scanner.
-Analyze this image (it may be a purchase invoice/bill, product box, mobile phone IMEI sticker, or barcode label).
-Extract and return STRICT JSON ONLY with this exact schema:
+Analyze this image (purchase invoice/bill, product box, mobile phone IMEI sticker, or barcode label).
+Extract EVERY visible 15-digit IMEI number (IMEI 1, IMEI 2), barcode digits, and bill line items.
+Return STRICT JSON ONLY with this exact schema:
 {
-  "code": "primary 15-digit IMEI or barcode number if visible, else empty string",
+  "code": "primary 15-digit IMEI or barcode digits (digits only, no spaces/dashes), else empty string",
+  "allCodes": ["list every visible 15-digit IMEI and barcode string cleanly without spaces"],
   "codeType": "imei" | "barcode" | "bill" | "text" | "none",
-  "productName": "product or model name if single product, else empty string",
+  "productName": "product or mobile model name if single product, else empty string",
   "price": 0,
   "mrp": 0,
   "qty": 1,
@@ -245,12 +663,16 @@ Extract and return STRICT JSON ONLY with this exact schema:
     { "name": "item name", "barcode": "", "imei": "", "qty": 1, "price": 0, "mrp": 0, "unit": "Piece" }
   ]
 }
-If multiple items appear on a paper/printed bill, list all line items in "items". Always prefer 15-digit IMEI numbers when present on mobile boxes/labels.`
+If multiple items appear on a paper/printed bill, list all line items in "items". Always prioritize 15-digit IMEI numbers when present on mobile boxes/labels.`
       : `You are an expert retail Barcode & 15-digit Mobile IMEI OCR scanner.
-Inspect this photo carefully for any 1D/2D barcode digits, 15-digit IMEI number (printed on phone box or sticker), serial number, or product name/price label.
+Inspect this photo very carefully for:
+1. Any 15-digit IMEI numbers (e.g., IMEI 1, IMEI 2, MEID, printed near barcodes on phone boxes, back stickers, or *#06# screens). Remove any spaces, hyphens, or slashes from IMEI digits.
+2. Any 1D/2D barcode numbers (EAN-13, EAN-8, UPC-A, Code-128, serial numbers).
+3. Product / mobile model name, MRP, or price tag if visible.
 Return STRICT JSON ONLY:
 {
-  "code": "the 15-digit IMEI or barcode digits (exact digits only, no spaces)",
+  "code": "primary 15-digit IMEI or barcode digits (exact digits, no spaces)",
+  "allCodes": ["every distinct 15-digit IMEI and barcode visible in the photo"],
   "codeType": "imei" | "barcode" | "text" | "none",
   "productName": "product or mobile model name if visible, else empty string",
   "price": 0,
@@ -260,6 +682,7 @@ Return STRICT JSON ONLY:
 }`;
 
   const parseJsonSafely = (raw: string): ScannedVisionResult | null => {
+    const regexExtracted = extractAllCodesFromText(raw);
     try {
       const cleaned = raw
         .replace(/```json/gi, '')
@@ -267,24 +690,56 @@ Return STRICT JSON ONLY:
         .trim();
       const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
       const obj = JSON.parse(jsonMatch ? jsonMatch[0] : cleaned);
-      const code = String(obj.code || '').trim();
+
+      const rawAll: string[] = [];
+      if (obj.code) rawAll.push(normalizeScannedCode(String(obj.code)));
+      if (obj.imei) rawAll.push(normalizeScannedCode(String(obj.imei)));
+      if (obj.imei1) rawAll.push(normalizeScannedCode(String(obj.imei1)));
+      if (obj.imei2) rawAll.push(normalizeScannedCode(String(obj.imei2)));
+      if (obj.barcode) rawAll.push(normalizeScannedCode(String(obj.barcode)));
+      if (Array.isArray(obj.allCodes)) {
+        for (const c of obj.allCodes) {
+          const norm = normalizeScannedCode(String(c || ''));
+          if (norm) rawAll.push(norm);
+        }
+      }
+      for (const c of regexExtracted.allCodes) rawAll.push(c);
+
       const items: ScannedBillItem[] = Array.isArray(obj.items)
         ? obj.items
-            .map((it: Record<string, unknown>) => ({
-              name: String(it.name || '').trim(),
-              barcode: String(it.barcode || it.imei || '').trim(),
-              imei: String(it.imei || '').trim(),
-              qty: Number(it.qty) || 1,
-              price: Number(it.price) || Number(it.mrp) || 0,
-              mrp: Number(it.mrp) || Number(it.price) || 0,
-              unit: String(it.unit || 'Piece'),
-            }))
-            .filter((it: ScannedBillItem) => it.name.length > 0 || (it.barcode && it.barcode.length > 0))
+            .map((it: Record<string, unknown>) => {
+              const imeiNorm = normalizeScannedCode(String(it.imei || ''));
+              const bcNorm = normalizeScannedCode(String(it.barcode || it.imei || ''));
+              if (imeiNorm) rawAll.push(imeiNorm);
+              if (bcNorm) rawAll.push(bcNorm);
+              return {
+                name: String(it.name || '').trim(),
+                barcode: bcNorm,
+                imei: imeiNorm,
+                qty: Number(it.qty) || 1,
+                price: Number(it.price) || Number(it.mrp) || 0,
+                mrp: Number(it.mrp) || Number(it.price) || 0,
+                unit: String(it.unit || 'Piece'),
+              };
+            })
+            .filter((it: ScannedBillItem) => it.name.length > 0 || Boolean(it.barcode))
         : [];
 
+      const allCodes = sortDetectedCodes(rawAll);
+      const primaryCode = allCodes[0] || '';
+      const computedType: ScannedVisionResult['codeType'] =
+        mode === 'bill_items' && items.length > 1
+          ? 'bill'
+          : /^\d{15}$/.test(primaryCode)
+            ? 'imei'
+            : primaryCode
+              ? 'barcode'
+              : obj.codeType || 'none';
+
       return {
-        code: code || items[0]?.imei || items[0]?.barcode || '',
-        codeType: obj.codeType || (code.length === 15 ? 'imei' : code ? 'barcode' : 'none'),
+        code: primaryCode,
+        allCodes,
+        codeType: computedType,
         productName: String(obj.productName || items[0]?.name || '').trim(),
         price: Number(obj.price) || items[0]?.price || 0,
         mrp: Number(obj.mrp) || items[0]?.mrp || 0,
@@ -292,93 +747,99 @@ Return STRICT JSON ONLY:
         items,
       };
     } catch {
-      // Check if raw text contains a 15-digit IMEI or 8-14 digit barcode
-      const imeiMatch = raw.match(/\b\d{15}\b/);
-      if (imeiMatch) {
-        return { code: imeiMatch[0], codeType: 'imei' };
-      }
-      const barcodeMatch = raw.match(/\b\d{8,14}\b/);
-      if (barcodeMatch) {
-        return { code: barcodeMatch[0], codeType: 'barcode' };
+      if (regexExtracted.primary) {
+        return {
+          code: regexExtracted.primary,
+          allCodes: regexExtracted.allCodes,
+          codeType: regexExtracted.codeType,
+        };
       }
       return null;
     }
   };
 
-  // Attempt 1: Gemini Flash Vision API
-  try {
-    const geminiKey = getGeminiVisionKey();
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(geminiKey)}`,
-      {
+  // Attempt 1: Groq Vision API (Llama 4 Scout -> Llama 4 Maverick fallback)
+  const groqModels = [
+    'meta-llama/llama-4-scout-17b-16e-instruct',
+    'meta-llama/llama-4-maverick-17b-128e-instruct',
+  ];
+  for (const modelName of groqModels) {
+    try {
+      const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${getGroqApiKey()}`,
+        },
         body: JSON.stringify({
-          contents: [
+          model: modelName,
+          messages: [
             {
-              parts: [
-                { text: promptText },
-                { inline_data: { mime_type: mimeType, data: base64 } },
+              role: 'user',
+              content: [
+                { type: 'text', text: promptText },
+                {
+                  type: 'image_url',
+                  image_url: { url: `data:${mimeType};base64,${base64}` },
+                },
               ],
             },
           ],
-          generationConfig: {
-            temperature: 0.1,
-            responseMimeType: 'application/json',
-          },
+          temperature: 0.1,
+          max_tokens: 750,
         }),
-      }
-    );
+      });
 
-    if (res.ok) {
-      const data = await res.json();
-      const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      const parsed = parseJsonSafely(rawText);
-      if (parsed && (parsed.code || (parsed.items && parsed.items.length > 0) || parsed.productName)) {
-        return parsed;
+      if (res.ok) {
+        const data = await res.json();
+        const rawText = data?.choices?.[0]?.message?.content || '';
+        const parsed = parseJsonSafely(rawText);
+        if (parsed && (parsed.code || (parsed.items && parsed.items.length > 0) || parsed.productName)) {
+          return parsed;
+        }
       }
+    } catch (err) {
+      console.warn(`Groq Vision (${modelName}) attempt error:`, err);
     }
-  } catch (err) {
-    console.warn('Gemini Flash Vision attempt skipped/fallback to Groq Vision:', err);
   }
 
-  // Attempt 2: Groq Vision API (meta-llama/llama-4-scout-17b-16e-instruct)
-  try {
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${getGroqApiKey()}`,
-      },
-      body: JSON.stringify({
-        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: promptText },
+  // Attempt 2: Gemini Flash Vision API (only if a valid AIza... key is configured)
+  const geminiKey = getGeminiVisionKey();
+  if (geminiKey) {
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(geminiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [
               {
-                type: 'image_url',
-                image_url: { url: `data:${mimeType};base64,${base64}` },
+                parts: [
+                  { text: promptText },
+                  { inline_data: { mime_type: mimeType, data: base64 } },
+                ],
               },
             ],
-          },
-        ],
-        temperature: 0.1,
-        max_tokens: 700,
-      }),
-    });
+            generationConfig: {
+              temperature: 0.1,
+              responseMimeType: 'application/json',
+            },
+          }),
+        }
+      );
 
-    if (res.ok) {
-      const data = await res.json();
-      const rawText = data?.choices?.[0]?.message?.content || '';
-      const parsed = parseJsonSafely(rawText);
-      if (parsed) {
-        return parsed;
+      if (res.ok) {
+        const data = await res.json();
+        const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        const parsed = parseJsonSafely(rawText);
+        if (parsed && (parsed.code || (parsed.items && parsed.items.length > 0) || parsed.productName)) {
+          return parsed;
+        }
       }
+    } catch (err) {
+      console.warn('Gemini Flash Vision attempt error:', err);
     }
-  } catch (err) {
-    console.error('Groq Vision fallback error:', err);
   }
 
   return { code: '', codeType: 'none' };

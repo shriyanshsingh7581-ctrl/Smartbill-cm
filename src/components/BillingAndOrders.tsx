@@ -1643,14 +1643,25 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
             onClick={() =>
               onOpenScanner(
                 (code, visionResult) => {
-                  const matched = products.find((p) => p.barcode === code);
+                  const cleanCode = code.trim().toLowerCase();
+                  const matchesCode = (p: ProductDoc, target: string) => {
+                    const t = target.trim().toLowerCase();
+                    if (!t) return false;
+                    return (
+                      (p.barcode && p.barcode.trim().toLowerCase() === t) ||
+                      Boolean(p.variants?.some((v) => v.barcode && v.barcode.trim().toLowerCase() === t))
+                    );
+                  };
+                  const matched = products.find((p) => matchesCode(p, cleanCode));
                   if (matched) {
                     addProductToCart(matched);
+                    showToast('success', `Added ${matched.name}`);
                   } else if (visionResult?.items && visionResult.items.length > 0) {
                     const newCartItems: OrderLineItem[] = visionResult.items.map((it, idx) => {
+                      const itemCode = it.imei || it.barcode || '';
                       const found = products.find(
                         (p) =>
-                          (it.barcode && p.barcode === it.barcode) ||
+                          (itemCode && matchesCode(p, itemCode)) ||
                           (it.name && p.name.toLowerCase() === it.name.toLowerCase())
                       );
                       return {
@@ -1724,12 +1735,15 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
           </label>
           <div className="flex-1 overflow-y-auto p-4 space-y-2">
             {products
-              .filter(
-                (p) =>
-                  !posSearch.trim() ||
-                  p.name.toLowerCase().includes(posSearch.toLowerCase()) ||
-                  (p.barcode && p.barcode.includes(posSearch))
-              )
+              .filter((p) => {
+                if (!posSearch.trim()) return true;
+                const q = posSearch.trim().toLowerCase();
+                return (
+                  p.name.toLowerCase().includes(q) ||
+                  (p.barcode && p.barcode.toLowerCase().includes(q)) ||
+                  Boolean(p.variants?.some((v) => v.barcode && v.barcode.toLowerCase().includes(q)))
+                );
+              })
               .map((p) => (
                 <button
                   key={p.id}
@@ -1794,7 +1808,17 @@ export const BillingAndOrders: React.FC<BillingAndOrdersProps> = ({
                 />
                 <button
                   type="button"
-                  onClick={() => onOpenScanner((c) => setQaBarcode(c))}
+                  onClick={() =>
+                    onOpenScanner((c, visionResult) => {
+                      setQaBarcode(c);
+                      if (!qaName.trim() && visionResult?.productName) setQaName(visionResult.productName);
+                      if (!qaMrp && (visionResult?.mrp || visionResult?.price)) {
+                        const p = String(visionResult.mrp || visionResult.price);
+                        setQaMrp(p);
+                        if (!qaRetail) setQaRetail(String(visionResult.price || visionResult.mrp));
+                      }
+                    })
+                  }
                   className="text-slate-600 p-1"
                 >
                   <ScanLine className="w-4 h-4" />

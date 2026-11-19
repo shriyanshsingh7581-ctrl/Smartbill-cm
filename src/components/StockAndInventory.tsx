@@ -304,6 +304,16 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
     }
   };
 
+  const matchesProductCode = (p: ProductDoc, rawCode: string) => {
+    const clean = rawCode.trim().toLowerCase();
+    if (!clean) return false;
+    if (p.barcode && p.barcode.trim().toLowerCase() === clean) return true;
+    if (p.variants?.some((v) => v.barcode && v.barcode.trim().toLowerCase() === clean)) {
+      return true;
+    }
+    return false;
+  };
+
   // Filtered products for My Stock
   const filteredProducts = products
     .filter((p) => {
@@ -318,11 +328,12 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
     })
     .filter((p) => {
       if (!searchQuery.trim()) return true;
-      const q = searchQuery.toLowerCase();
+      const q = searchQuery.trim().toLowerCase();
       return (
         p.name.toLowerCase().includes(q) ||
         (p.barcode && p.barcode.toLowerCase().includes(q)) ||
-        (p.variantName && p.variantName.toLowerCase().includes(q))
+        (p.variantName && p.variantName.toLowerCase().includes(q)) ||
+        Boolean(p.variants?.some((v) => v.barcode && v.barcode.toLowerCase().includes(q)))
       );
     })
     .sort((a, b) => (sortAsc ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name)));
@@ -575,9 +586,23 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
             <button
               type="button"
               onClick={() =>
-                onOpenScanner((code) => {
-                  setQaBarcode(code);
-                  setQuickAddOpen(true);
+                onOpenScanner((code, visionResult) => {
+                  const found = products.find((p) => matchesProductCode(p, code));
+                  if (found) {
+                    setSearchQuery(code);
+                    setSubScreen('my_stock');
+                    showToast('success', `Found: ${found.name}`);
+                  } else {
+                    setQaBarcode(code);
+                    if (visionResult?.productName) setQaName(visionResult.productName);
+                    if (visionResult?.mrp || visionResult?.price) {
+                      const p = String(visionResult.mrp || visionResult.price);
+                      setQaMrp(p);
+                      setQaRetail(String(visionResult.price || visionResult.mrp));
+                    }
+                    setQaAddToInventory(true);
+                    setQuickAddOpen(true);
+                  }
                 })
               }
               className="text-slate-600 hover:text-slate-900"
@@ -686,14 +711,26 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
             <button
               type="button"
               onClick={() =>
-                onOpenScanner((code) => {
-                  const found = products.find((p) => p.barcode === code);
+                onOpenScanner((code, visionResult) => {
+                  const found = products.find((p) => matchesProductCode(p, code));
                   if (found) {
                     setSearchQuery(code);
                     setSubScreen('my_stock');
+                    showToast('success', `Found: ${found.name}`);
                   } else {
                     resetManualForm(code);
+                    if (visionResult?.productName) setManualName(visionResult.productName);
+                    if (visionResult?.mrp || visionResult?.price) {
+                      const mrpVal = Number(visionResult.mrp || visionResult.price) || 0;
+                      const retailVal = Number(visionResult.price || visionResult.mrp) || 0;
+                      setVariants((prev) =>
+                        prev.map((v, i) =>
+                          i === 0 ? { ...v, barcode: code, mrp: mrpVal, retailPrice: retailVal } : v
+                        )
+                      );
+                    }
                     setSubScreen('manual_add');
+                    showToast('success', `Scanned: ${code}`);
                   }
                 })
               }
@@ -877,7 +914,7 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
                         const itemCode = it.imei || it.barcode || '';
                         const matched = products.find(
                           (p) =>
-                            (itemCode && p.barcode === itemCode) ||
+                            (itemCode && matchesProductCode(p, itemCode)) ||
                             (it.name && p.name.toLowerCase() === it.name.toLowerCase())
                         );
                         return {
@@ -897,10 +934,11 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
                         };
                       });
                       setPurItems((prev) => [...prev, ...scannedItems]);
+                      showToast('success', `Added ${scannedItems.length} scanned item(s)`);
                       return;
                     }
 
-                    const found = products.find((p) => p.barcode === code);
+                    const found = products.find((p) => matchesProductCode(p, code));
                     if (found) {
                       setPurItems((prev) => [
                         ...prev,
@@ -997,7 +1035,14 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
               {purSearch.trim() && (
                 <div className="absolute bottom-full left-0 right-0 mb-1 bg-white border border-slate-200 rounded-xl shadow-lg max-h-44 overflow-y-auto z-30">
                   {products
-                    .filter((p) => p.name.toLowerCase().includes(purSearch.toLowerCase()))
+                    .filter((p) => {
+                      const q = purSearch.trim().toLowerCase();
+                      return (
+                        p.name.toLowerCase().includes(q) ||
+                        (p.barcode && p.barcode.toLowerCase().includes(q)) ||
+                        Boolean(p.variants?.some((v) => v.barcode && v.barcode.toLowerCase().includes(q)))
+                      );
+                    })
                     .map((p) => (
                       <button
                         key={p.id}
@@ -1035,9 +1080,39 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
             <button
               type="button"
               onClick={() =>
-                onOpenScanner((code) => {
-                  setQaBarcode(code);
-                  setQuickAddOpen(true);
+                onOpenScanner((code, visionResult) => {
+                  const found = products.find((p) => matchesProductCode(p, code));
+                  if (found) {
+                    setPurItems((prev) => [
+                      ...prev,
+                      {
+                        productId: found.id,
+                        name: found.name,
+                        variantName: found.variantName,
+                        barcode: found.barcode || code,
+                        unit: found.unit,
+                        qty: visionResult?.qty || 1,
+                        mrp: found.mrp,
+                        retailPrice: found.retailPrice,
+                        purchasePrice: found.purchasePrice || found.retailPrice,
+                        gst: found.gst,
+                        cess: found.cess,
+                        hsn: found.hsn,
+                        discount: 0,
+                      },
+                    ]);
+                    showToast('success', `Added ${found.name} to purchase`);
+                  } else {
+                    setQaBarcode(code);
+                    if (visionResult?.productName) setQaName(visionResult.productName);
+                    if (visionResult?.mrp || visionResult?.price) {
+                      const p = String(visionResult.mrp || visionResult.price);
+                      setQaMrp(p);
+                      setQaRetail(String(visionResult.price || visionResult.mrp));
+                      setQaPurchasePrice(String(visionResult.price || visionResult.mrp));
+                    }
+                    setQuickAddOpen(true);
+                  }
                 })
               }
               className="bg-white border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-800 flex items-center gap-1.5 shadow-xs"
@@ -1446,7 +1521,19 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
                         <button
                           type="button"
                           onClick={() =>
-                            onOpenScanner((code) => updateVariantField(idx, 'barcode', code))
+                            onOpenScanner((code, visionResult) => {
+                              updateVariantField(idx, 'barcode', code);
+                              if (!manualName.trim() && visionResult?.productName) {
+                                setManualName(visionResult.productName);
+                              }
+                              if (visionResult?.mrp || visionResult?.price) {
+                                const mrpVal = Number(visionResult.mrp || visionResult.price) || 0;
+                                const retVal = Number(visionResult.price || visionResult.mrp) || 0;
+                                if (!v.mrp && mrpVal) updateVariantField(idx, 'mrp', mrpVal);
+                                if (!v.retailPrice && retVal) updateVariantField(idx, 'retailPrice', retVal);
+                              }
+                              showToast('success', `Code scanned: ${code}`);
+                            })
                           }
                           className="text-slate-700 p-1"
                         >
@@ -2396,7 +2483,18 @@ export const StockAndInventory: React.FC<StockAndInventoryProps> = ({
                 />
                 <button
                   type="button"
-                  onClick={() => onOpenScanner((c) => setQaBarcode(c))}
+                  onClick={() =>
+                    onOpenScanner((c, visionResult) => {
+                      setQaBarcode(c);
+                      if (!qaName.trim() && visionResult?.productName) setQaName(visionResult.productName);
+                      if (!qaMrp && (visionResult?.mrp || visionResult?.price)) {
+                        const p = String(visionResult.mrp || visionResult.price);
+                        setQaMrp(p);
+                        if (!qaRetail) setQaRetail(String(visionResult.price || visionResult.mrp));
+                      }
+                      showToast('success', `Scanned: ${c}`);
+                    })
+                  }
                   className="text-slate-600 p-1"
                 >
                   <ScanLine className="w-4 h-4" />
